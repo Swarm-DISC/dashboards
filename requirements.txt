@@ -1,0 +1,1 @@
+chaosmagpy==0.12
