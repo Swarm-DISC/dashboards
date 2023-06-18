@@ -9,6 +9,7 @@ dependencies:
   - pip
   - jupyter
   - cartopy
+  - datashader
   - hvplot
   - pandas
   - panel
