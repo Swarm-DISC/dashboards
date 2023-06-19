@@ -2,13 +2,14 @@
 
 To build the image and deploy:
 ```
-docker build . -t dashboards
+sudo docker build . -t dashboards
 sudo docker-compose up
 ```
 
-To run locally:
+To run locally with podman:
 ```
-docker run --rm -it -p 5006:5006 -v ./src:/home/panel-user/src dashboards panel serve src/* --allow-websocket-origin=* --warm
+podman build . -t dashboards
+podman run --rm -it -p 5006:5006 -v ./src:/home/panel-user/src dashboards panel serve src/geomagnetic-model-explorer.ipynb --allow-websocket-origin=* --warm
 ```
 
 To update `environment-exact.txt`:

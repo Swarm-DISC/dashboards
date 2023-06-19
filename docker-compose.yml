@@ -6,4 +6,4 @@ services:
       - ./src:/home/panel-user/src
     ports:
       - 80:5006
-    command: panel serve src/* --allow-websocket-origin=* --warm --num-procs 1
+    command: panel serve src/geomagnetic-model-explorer.ipynb --allow-websocket-origin=* --warm --num-procs 1
