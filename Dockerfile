@@ -12,8 +12,8 @@ RUN mamba install --file environment-exact.txt
 COPY requirements.txt .
 RUN /bin/bash -c 'source activate base && pip install -r requirements.txt'
 # spacepy (had trouble installing it normally...)
-COPY wheels/spacepy-0.4.1-cp310-cp310-linux_x86_64.whl .
-RUN /bin/bash -c 'source activate base && pip install spacepy-0.4.1-cp310-cp310-linux_x86_64.whl'
+COPY wheels/spacepy-0.2.3-cp310-cp310-linux_x86_64.whl .
+RUN /bin/bash -c 'source activate base && pip install spacepy-0.2.3-cp310-cp310-linux_x86_64.whl'
 
 ENV EOXMAGMOD_TAG_NAME=eoxmagmod-0.12.1
 
