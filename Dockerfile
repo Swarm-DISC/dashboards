@@ -41,3 +41,9 @@ USER panel-user
 WORKDIR /home/panel-user
 # Fix for CDF installation location
 ENV CDF_LIB=/opt/conda/lib/
+
+# Add the dashboard code into the image
+COPY src /home/panel-user/src
+# Default command to run (might be replaced by docker-compose.yml)
+# Publishes the dashboards at port 5006
+CMD panel serve src/geomagnetic-model-explorer.ipynb --allow-websocket-origin=* --warm --num-procs 1
