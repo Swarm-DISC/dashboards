@@ -1,12 +1,21 @@
 # Dashboards built with panel
 
-To build the image and deploy:
+Run published image:
 ```
-sudo docker build . -t dashboards
-sudo docker-compose up
+docker run --rm -ti --platform linux/amd64 -p 80:5006 ghcr.io/swarm-disc/dashboards:main
 ```
 
-To run locally with podman:
+Create and use persistent directory used by diskcache between runs
+```
+mkdir cache
+chmod 777 cache
+```
+then pass that as a volume to the container:
+```
+docker run --rm -ti --platform linux/amd64 -p 80:5006 -v ./cache:/home/panel-user/cache ghcr.io/swarm-disc/dashboards:main
+```
+
+Build and run locally:
 ```
 podman build . -t dashboards
 podman run --rm -it -p 5006:5006 -v ./src:/home/panel-user/src dashboards panel serve src/geomagnetic-model-explorer.ipynb --allow-websocket-origin=* --warm

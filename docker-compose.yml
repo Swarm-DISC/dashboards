@@ -2,6 +2,8 @@ version: '3'
 services:
   panel:
     image: dashboards
+    volumes:
+      - ./cache:/home/panel-user/cache
     ports:
       - 80:5006
     command: panel serve src/geomagnetic-model-explorer.ipynb --allow-websocket-origin=* --warm --num-procs 1

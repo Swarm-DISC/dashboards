@@ -35,6 +35,9 @@ RUN mamba remove --quiet --yes --force conda-build conda-verify
 RUN mamba clean --all -f -y
 RUN rm -fR $HOME/.cache/pip/ $HOME/build/
 
+# Patch in diskcache
+RUN mamba install -y diskcache
+
 # Create user which runs the dashboards (instead of as root)
 RUN useradd --create-home --shell /bin/bash panel-user
 USER panel-user
