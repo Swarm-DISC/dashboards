@@ -38,15 +38,19 @@ RUN rm -fR $HOME/.cache/pip/ $HOME/build/
 # Patch in diskcache
 RUN mamba install -y diskcache
 
-# Create user which runs the dashboards (instead of as root)
-RUN useradd --create-home --shell /bin/bash panel-user
-USER panel-user
-WORKDIR /home/panel-user
+RUN /bin/bash -c 'source activate base && pip install viresclient'
+# Copy the entrypoint script and set it
+# NB: container must be supplied with $VIRES_TOKEN at runtime (e.g. via .env file)
+COPY entrypoint.sh /root/entrypoint.sh
+RUN chmod +x /root/entrypoint.sh
+ENTRYPOINT ["/root/entrypoint.sh"]
+
 # Fix for CDF installation location
 ENV CDF_LIB=/opt/conda/lib/
 
 # Add the dashboard code into the image
-COPY src /home/panel-user/src
+COPY src /root/dashboards
+
 # Default command to run (might be replaced by docker-compose.yml)
 # Publishes the dashboards at port 5006
-CMD panel serve src/geomagnetic-model-explorer.ipynb --allow-websocket-origin=* --warm --num-procs 1
+# CMD panel serve /root/dashboards/vires-catalog.ipynb --allow-websocket-origin=* --warm --num-procs 1
