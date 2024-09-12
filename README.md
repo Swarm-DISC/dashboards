@@ -4,28 +4,24 @@ Images published at https://github.com/Swarm-DISC/dashboards/pkgs/container/dash
 
 ## Usage
 
-Create and use persistent directory used by diskcache between runs
+Create and use persistent directory used by diskcache between runs:
 ```
 mkdir cache
 chmod 777 cache
 ```
-then pass that as a volume to the container:
-```
-docker run --rm -ti --platform linux/amd64 -p 80:5006 -v ./cache:/home/panel-user/cache ghcr.io/swarm-disc/dashboards:main
-```
 
-Or copy the `docker-compose.yml` from here and modify it to control the behaviour and use `docker compose up` to start the service.
-
-References:
-- https://panel.holoviz.org/how_to/server/commandline.html
-- https://docs.docker.com/engine/reference/commandline/compose/
+Create a environment file to store secrets and add an access token
+```
+# .env
+VIRES_TOKEN=...
+```
 
 ## Development
 
 Build and run locally:
 ```
 podman build . -t dashboards
-podman run --rm -it -p 5006:5006 -v ./cache:/home/panel-user/cache dashboards panel serve src/geomagnetic-model-explorer.ipynb --warm
+podman run --rm -it -p 5006:5006 -v ./cache:/home/panel-user/cache --env-file .env dashboards bash -c "panel serve /root/dashboards/*ipynb --warm"
 ```
 
 To update `environment-exact.txt`:
