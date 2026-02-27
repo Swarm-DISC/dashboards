@@ -309,9 +309,15 @@ class ViresParameters(param.Parameterized):
     vobs_code_snippet = param.String("")
     vobs_preview_dataset_html = param.String("")
 
-    @param.depends("collection_type", watch=True)
+    _default_measurements_by_type = {
+        "MAG": ["B_NEC"],
+        "VOBS": ["SiteCode", "B_OB", "B_CF"],
+    }
+
+    @param.depends("collection_type", watch=True, on_init=True)
     def _update_collections_and_measurements(self) -> None:
-        self.measurements = []
+        default_measurements = self._default_measurements_by_type.get(self.collection_type, [])
+        self.measurements = list(default_measurements)
         collections = COLLECTION_MAP[self.collection_type]
         self.param["collection"].objects = collections
         self.collection = collections[0]
@@ -392,7 +398,12 @@ class ViresParameters(param.Parameterized):
         try:
             measurements = vires.available_measurements(collection)
             self.param["vobs_measurements"].objects = measurements
-            self.vobs_measurements = []
+            default_measurements = self._default_measurements_by_type.get("VOBS", [])
+            self.vobs_measurements = [
+                measurement
+                for measurement in default_measurements
+                if measurement in measurements
+            ]
         except Exception:
             self.param["vobs_measurements"].objects = []
             self.vobs_measurements = []
@@ -661,9 +672,39 @@ def _build_dashboard(state: ViresParameters) -> pn.FlexBox:
         margin=(0, 12, 0, 0),
     )
 
-    preview_column = pn.Column(
+    code_section = pn.Column(
+        pn.pane.Markdown("**Code example**", margin=(0, 0, 8, 0)),
         code_editor,
-        html_pane,
+        sizing_mode="stretch_width",
+        styles={
+            "border": "1px solid #fde68a",
+            "background": "#fffbeb",
+            "border-radius": "8px",
+            "padding": "12px",
+        },
+    )
+
+    preview_tabs = pn.layout.Tabs(
+        ("Data", html_pane),
+        ("Plot", pn.pane.Markdown("Plot preview coming next.", margin=(8, 0, 0, 0))),
+        sizing_mode="stretch_both",
+    )
+
+    preview_section = pn.Column(
+        pn.pane.Markdown("**Preview**", margin=(0, 0, 8, 0)),
+        preview_tabs,
+        sizing_mode="stretch_both",
+        styles={
+            "border": "1px solid #fbcfe8",
+            "background": "#fdf2f8",
+            "border-radius": "8px",
+            "padding": "12px",
+        },
+    )
+
+    preview_column = pn.Column(
+        code_section,
+        preview_section,
         sizing_mode="stretch_both",
         min_width=360,
     )
