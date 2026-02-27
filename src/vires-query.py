@@ -368,7 +368,6 @@ class MagState(param.Parameterized):
     mission = param.Selector(default="Swarm", objects=list(MAG_COLLECTIONS.keys()))
     spacecraft = param.Selector()
     variant = param.Selector()
-    mag_collection = param.String()
 
     _last_dataset = None
     _default_measurements_by_type = {"MAG": ["B_NEC"]}
@@ -453,13 +452,10 @@ class MagState(param.Parameterized):
         self.variant = variants[0]
 
     @param.depends("spacecraft", "variant", watch=True, on_init=True)
-    def _update_mag_collection(self) -> None:
-        self.mag_collection = MAG_COLLECTIONS[self.mission][self.spacecraft][self.variant]
-
-    @param.depends("mission", "spacecraft", "variant", "mag_collection", watch=True, on_init=True)
-    def _update_collections(self) -> None:
-        self.collection_type = COLLECTIONS_TO_TYPES[self.mag_collection]
-        self.collection = self.mag_collection
+    def _update_collection_from_mag(self) -> None:
+        mag_collection = MAG_COLLECTIONS[self.mission][self.spacecraft][self.variant]
+        self.collection_type = COLLECTIONS_TO_TYPES[mag_collection]
+        self.collection = mag_collection
 
     @param.depends("collection", watch=True, on_init=True)
     def _update_auto_time_range(self) -> None:
@@ -571,7 +567,7 @@ def _build_collection_tabs(mag_state: MagState, vobs_state: VobsState) -> pn.Tab
         ),
         pn.Param(
             mag_state,
-            parameters=["mission", "spacecraft", "variant", "mag_collection"],
+            parameters=["mission", "spacecraft", "variant"],
             name="Magnetic (space)",
             sizing_mode="stretch_width",
         ),
