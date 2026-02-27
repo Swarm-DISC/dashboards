@@ -730,7 +730,7 @@ def _build_dashboard(state: ViresParameters) -> pn.FlexBox:
         state,
         parameters=["plot_measurements"],
         widgets={
-            "plot_measurements": {"type": pn.widgets.Select, "size": 1},
+            "plot_measurements": {"type": pn.widgets.MultiSelect, "size": 5},
         },
         show_name=False,
         sizing_mode="stretch_width",
@@ -740,7 +740,7 @@ def _build_dashboard(state: ViresParameters) -> pn.FlexBox:
         state,
         parameters=["vobs_plot_measurements"],
         widgets={
-            "vobs_plot_measurements": {"type": pn.widgets.Select, "size": 1},
+            "vobs_plot_measurements": {"type": pn.widgets.MultiSelect, "size": 5},
         },
         show_name=False,
         sizing_mode="stretch_width",
