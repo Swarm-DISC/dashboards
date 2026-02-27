@@ -1,16 +1,58 @@
 import asyncio
 import datetime as dt
+import re
+import traceback
 from typing import Dict, List, Optional, Tuple
 
+import holoviews as hv
+from holoviews import opts
+import hvplot.xarray  # noqa: F401
 import panel as pn
 import param
 from viresclient import SwarmRequest
-import hvplot.xarray  # noqa: F401
-import holoviews as hv  # noqa: F401
 
 pn.extension("codeeditor")
 if pn.state.curdoc is not None:
     pn.state.curdoc.title = "VirES Query Builder"
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+VOBS_TAB = 2  # index of the VOBS/GVO tab in the collection-type tab bar
+
+_SECTION_STYLES = {
+    "collection": {
+        "border": "1px solid #c7d2fe",
+        "background": "#eef2ff",
+        "border-radius": "8px",
+        "padding": "12px",
+    },
+    "parameters": {
+        "border": "1px solid #a7f3d0",
+        "background": "#ecfdf3",
+        "border-radius": "8px",
+        "padding": "12px",
+    },
+    "code": {
+        "border": "1px solid #fde68a",
+        "background": "#fffbeb",
+        "border-radius": "8px",
+        "padding": "12px",
+    },
+    "preview": {
+        "border": "1px solid #fbcfe8",
+        "background": "#fdf2f8",
+        "border-radius": "8px",
+        "padding": "12px",
+    },
+}
+_HINT_STYLES = {"color": "#374151", "font-size": "12px"}
+_EXCLUDED_AUXILIARIES = {"Timestamp", "Latitude", "Longitude", "Radius", "Spacecraft"}
+
+# ---------------------------------------------------------------------------
+# Request templates
+# ---------------------------------------------------------------------------
 
 REQUEST_TEMPLATE = """import datetime as dt
 from viresclient import SwarmRequest
@@ -47,6 +89,10 @@ data = request.get_between(
     show_progress=False,
 )
 ds = data.as_xarray(reshape=False)"""
+
+# ---------------------------------------------------------------------------
+# Collection data
+# ---------------------------------------------------------------------------
 
 MAG_COLLECTIONS = {
     "Swarm": {
@@ -105,7 +151,7 @@ def _load_metadata() -> tuple[Dict[str, List[str]], Dict[str, List[str]], List[s
     auxiliaries = [
         aux
         for aux in vires.available_auxiliaries()
-        if aux not in {"Timestamp", "Latitude", "Longitude", "Radius", "Spacecraft"}
+        if aux not in _EXCLUDED_AUXILIARIES
     ]
     mag_models = vires.available_models(details=False)
     collections_to_types = vires._available["collections_to_keys"]
@@ -115,10 +161,16 @@ def _load_metadata() -> tuple[Dict[str, List[str]], Dict[str, List[str]], List[s
 
 COLLECTION_MAP, MEASUREMENTS_BY_COLLECTION, AUXILIARIES, MAG_MODELS, COLLECTIONS_TO_TYPES, COLLECTION_SAMPLING_STEPS = _load_metadata()
 
+# ---------------------------------------------------------------------------
+# Utility functions
+# ---------------------------------------------------------------------------
+
+_TIME_EXTENT_CACHE: Dict[str, Optional[Tuple[str, str]]] = {}
+
 
 def _parse_iso8601_duration(duration_str: str) -> dt.timedelta:
     """Parse ISO 8601 duration string to timedelta.
-    
+
     Supports formats like:
     - PT1S (1 second)
     - PT0.019S (0.019 seconds)
@@ -126,151 +178,20 @@ def _parse_iso8601_duration(duration_str: str) -> dt.timedelta:
     - P31D (31 days)
     - P122D (122 days)
     """
-    import re
-    
-    # Pattern for ISO 8601 duration
     pattern = r'P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:([\d.]+)S)?)?'
     match = re.match(pattern, duration_str)
-    
+
     if not match:
         raise ValueError(f"Invalid ISO 8601 duration: {duration_str}")
-    
+
     days, hours, minutes, seconds = match.groups()
-    
-    delta = dt.timedelta(
+
+    return dt.timedelta(
         days=int(days) if days else 0,
         hours=int(hours) if hours else 0,
         minutes=int(minutes) if minutes else 0,
         seconds=float(seconds) if seconds else 0,
     )
-    
-    return delta
-
-
-def _calculate_auto_time_range(collection: str) -> tuple[dt.datetime, dt.datetime]:
-    """Calculate automatic time range for a collection.
-    
-    Sets start time to collection availability start.
-    Sets end time to start + 10 samples based on sampling step.
-    """
-    # Get collection time extent
-    time_extent = _get_collection_time_extent(collection)
-    if not time_extent:
-        # Fallback to a default range
-        start = dt.datetime(2024, 3, 1)
-        return start, start + dt.timedelta(minutes=1)
-    
-    # Parse start time
-    start_str, _ = time_extent
-    try:
-        # Try parsing ISO format with timezone
-        start = dt.datetime.fromisoformat(start_str.replace('Z', '+00:00'))
-        # Remove timezone info for consistency
-        start = start.replace(tzinfo=None)
-    except Exception:
-        # Fallback
-        start = dt.datetime(2024, 3, 1)
-    
-    # Get collection type to find sampling step
-    collection_type = COLLECTIONS_TO_TYPES.get(collection, "MAG")
-    sampling_step_str = COLLECTION_SAMPLING_STEPS.get(collection_type, "PT1S")
-    
-    # Parse sampling step
-    try:
-        sampling_step = _parse_iso8601_duration(sampling_step_str)
-    except Exception:
-        sampling_step = dt.timedelta(seconds=1)
-    
-    # Calculate end time for 10 samples
-    end = start + (sampling_step * 10)
-    
-    return start, end
-
-
-def _render_request_snippet(
-    collection: str,
-    measurements: List[str],
-    auxiliaries: List[str],
-    time_range: tuple[dt.datetime, dt.datetime],
-    magnetic_model: str,
-) -> str:
-    return REQUEST_TEMPLATE.format(
-        collection=collection,
-        measurements=measurements,
-        auxiliaries=auxiliaries,
-        time_range=time_range,
-        magnetic_model=magnetic_model,
-    ).replace("datetime.datetime", "dt.datetime")
-
-
-def _build_preview_dataset(
-    collection: str,
-    measurements: List[str],
-    auxiliaries: List[str],
-    time_range: tuple[dt.datetime, dt.datetime],
-    magnetic_model: str,
-):
-    request = SwarmRequest()
-    request.set_collection(collection, verbose=False)
-    request.set_products(
-        measurements=measurements,
-        models=[magnetic_model] if magnetic_model else [],
-        auxiliaries=auxiliaries,
-    )
-    data = request.get_between(
-        start_time=time_range[0],
-        end_time=time_range[1],
-        asynchronous=False,
-        show_progress=False,
-    )
-    return data.as_xarray()
-
-
-def _build_plot(ds, measurements: List[str]) -> Optional[object]:
-    """Generate holoviz plots from xarray dataset for selected measurements."""
-    import holoviews as hv
-    from holoviews import opts
-
-    if ds is None or not measurements:
-        return None
-
-    try:
-        plots = []
-        for measurement in measurements:
-            if measurement in ds.data_vars:
-                var = ds[measurement]
-                # Skip non-numeric data
-                if not hasattr(var, 'values') or not var.dtype.kind in 'biufc':
-                    continue
-                # Handle different dimensions
-                if "Timestamp" in var.dims:
-                    p = var.hvplot.line(
-                        x="Timestamp",
-                        label=measurement,
-                        height=250,
-                        width=700,
-                    )
-                    plots.append(p)
-
-        if not plots:
-            return None
-
-        # Combine plots using overlay or layout
-        if len(plots) == 1:
-            return plots[0]
-        else:
-            # Stack plots vertically
-            return hv.Layout(plots).cols(1).opts(
-                opts.Layout(shared_axes=False),
-            )
-    except Exception as e:
-        import traceback
-        print(f"Plot generation failed: {e}")
-        traceback.print_exc()
-        return None
-
-
-_TIME_EXTENT_CACHE: Dict[str, Optional[Tuple[str, str]]] = {}
 
 
 def _extract_time_extent(value: object) -> Optional[Tuple[str, str]]:
@@ -332,7 +253,106 @@ def _format_time_extent_label(time_extent: Optional[Tuple[str, str]]) -> str:
     return f"Available time: {start} to {end}"
 
 
-class ViresParameters(param.Parameterized):
+def _calculate_auto_time_range(collection: str) -> tuple[dt.datetime, dt.datetime]:
+    """Calculate automatic time range: starts at collection availability start, spans 10 samples."""
+    time_extent = _get_collection_time_extent(collection)
+    if not time_extent:
+        start = dt.datetime(2024, 3, 1)
+        return start, start + dt.timedelta(minutes=1)
+
+    start_str, _ = time_extent
+    try:
+        start = dt.datetime.fromisoformat(start_str.replace('Z', '+00:00')).replace(tzinfo=None)
+    except Exception:
+        start = dt.datetime(2024, 3, 1)
+
+    collection_type = COLLECTIONS_TO_TYPES.get(collection, "MAG")
+    sampling_step_str = COLLECTION_SAMPLING_STEPS.get(collection_type, "PT1S")
+    try:
+        sampling_step = _parse_iso8601_duration(sampling_step_str)
+    except Exception:
+        sampling_step = dt.timedelta(seconds=1)
+
+    return start, start + sampling_step * 10
+
+
+def _render_request_snippet(
+    collection: str,
+    measurements: List[str],
+    auxiliaries: List[str],
+    time_range: tuple[dt.datetime, dt.datetime],
+    magnetic_model: str,
+) -> str:
+    return REQUEST_TEMPLATE.format(
+        collection=collection,
+        measurements=measurements,
+        auxiliaries=auxiliaries,
+        time_range=time_range,
+        magnetic_model=magnetic_model,
+    ).replace("datetime.datetime", "dt.datetime")
+
+
+def _build_preview_dataset(
+    collection: str,
+    measurements: List[str],
+    auxiliaries: List[str],
+    time_range: tuple[dt.datetime, dt.datetime],
+    magnetic_model: str,
+):
+    request = SwarmRequest()
+    request.set_collection(collection, verbose=False)
+    request.set_products(
+        measurements=measurements,
+        models=[magnetic_model] if magnetic_model else [],
+        auxiliaries=auxiliaries,
+    )
+    data = request.get_between(
+        start_time=time_range[0],
+        end_time=time_range[1],
+        asynchronous=False,
+        show_progress=False,
+    )
+    return data.as_xarray()
+
+
+def _build_plot(ds, measurements: List[str]) -> Optional[object]:
+    """Generate holoviz plots from xarray dataset for selected measurements."""
+    if ds is None or not measurements:
+        return None
+
+    try:
+        plots = []
+        for measurement in measurements:
+            if measurement in ds.data_vars:
+                var = ds[measurement]
+                if not hasattr(var, 'values') or var.dtype.kind not in 'biufc':
+                    continue
+                if "Timestamp" in var.dims:
+                    p = var.hvplot.line(
+                        x="Timestamp",
+                        label=measurement,
+                        height=250,
+                        width=700,
+                    )
+                    plots.append(p)
+
+        if not plots:
+            return None
+
+        if len(plots) == 1:
+            return plots[0]
+        return hv.Layout(plots).cols(1).opts(opts.Layout(shared_axes=False))
+    except Exception as e:
+        print(f"Plot generation failed: {e}")
+        traceback.print_exc()
+        return None
+
+
+# ---------------------------------------------------------------------------
+# State classes
+# ---------------------------------------------------------------------------
+
+class MagState(param.Parameterized):
     collection_type = param.Selector(default="MAG", objects=list(COLLECTION_MAP.keys()))
     collection = param.Selector(objects=COLLECTION_MAP["MAG"])
     measurements = param.ListSelector(default=[], objects=MEASUREMENTS_BY_COLLECTION["MAG"])
@@ -343,40 +363,23 @@ class ViresParameters(param.Parameterized):
     code_snippet = param.String("")
     preview_dataset_html = param.String("")
     preview_plot = param.Parameter(default=None)
+    plot_measurements = param.ListSelector(default=[], objects=[])
 
     mission = param.Selector(default="Swarm", objects=list(MAG_COLLECTIONS.keys()))
     spacecraft = param.Selector()
     variant = param.Selector()
     mag_collection = param.String()
 
-    vobs_collection = param.Selector(default="Swarm (1-monthly)", objects=list(VOBS_COLLECTIONS.keys()))
-    vobs_measurements = param.ListSelector(default=[], objects=[])
-    vobs_time_range = param.DateRange(default=(dt.datetime(2024, 3, 1), dt.datetime(2024, 3, 1, 0, 1)))
-    vobs_time_extent_label = param.String("")
-    vobs_code_snippet = param.String("")
-    vobs_preview_dataset_html = param.String("")
-    vobs_preview_plot = param.Parameter(default=None)
-
-    plot_measurements = param.ListSelector(default=[], objects=[])
-    vobs_plot_measurements = param.ListSelector(default=[], objects=[])
-
     _last_dataset = None
-    _last_vobs_dataset = None
-
-    _default_measurements_by_type = {
-        "MAG": ["B_NEC"],
-        "VOBS": ["SiteCode", "B_OB", "B_CF"],
-    }
+    _default_measurements_by_type = {"MAG": ["B_NEC"]}
 
     @param.depends("collection_type", watch=True, on_init=True)
     def _update_collections_and_measurements(self) -> None:
-        default_measurements = self._default_measurements_by_type.get(self.collection_type, [])
-        self.measurements = list(default_measurements)
+        self.measurements = list(self._default_measurements_by_type.get(self.collection_type, []))
         collections = COLLECTION_MAP[self.collection_type]
         self.param["collection"].objects = collections
         self.collection = collections[0]
-        measurements = MEASUREMENTS_BY_COLLECTION[self.collection_type]
-        self.param["measurements"].objects = measurements
+        self.param["measurements"].objects = MEASUREMENTS_BY_COLLECTION[self.collection_type]
 
     @param.depends(
         "collection",
@@ -419,26 +422,23 @@ class ViresParameters(param.Parameterized):
         else:
             self._last_dataset = ds
             self.preview_dataset_html = ds._repr_html_()
-            # Update plot_measurements options
             available_measurements = [m for m in self.measurements if m in ds.data_vars]
             self.param["plot_measurements"].objects = available_measurements
-            # Set plot_measurements to first item or all if available
             if available_measurements:
                 self.plot_measurements = [available_measurements[0]]
-            # Generate plot
-            plot = await asyncio.to_thread(
+            self.preview_plot = await asyncio.to_thread(
                 _build_plot,
                 ds,
                 self.plot_measurements or list(self.measurements),
             )
-            self.preview_plot = plot
 
     @param.depends("plot_measurements", watch=True)
     def _update_preview_plot_on_plot_measurement_change(self) -> None:
-        """Update plot when plot measurement selection changes."""
         if self._last_dataset is not None:
-            plot = _build_plot(self._last_dataset, list(self.plot_measurements) if self.plot_measurements else [])
-            self.preview_plot = plot
+            self.preview_plot = _build_plot(
+                self._last_dataset,
+                list(self.plot_measurements) if self.plot_measurements else [],
+            )
 
     @param.depends("mission", watch=True, on_init=True)
     def _update_spacecraft(self) -> None:
@@ -463,394 +463,228 @@ class ViresParameters(param.Parameterized):
 
     @param.depends("collection", watch=True, on_init=True)
     def _update_auto_time_range(self) -> None:
-        """Automatically adjust time range when MAG collection changes."""
         start, end = _calculate_auto_time_range(self.collection)
         self.time_range = (start, end)
 
-    @param.depends("vobs_collection", watch=True, on_init=True)
-    def _update_vobs_measurements(self) -> None:
-        collection = VOBS_COLLECTIONS[self.vobs_collection]
+
+class VobsState(param.Parameterized):
+    collection = param.Selector(
+        default="Swarm (1-monthly)", objects=list(VOBS_COLLECTIONS.keys())
+    )
+    measurements = param.ListSelector(default=[], objects=[])
+    time_range = param.DateRange(
+        default=(dt.datetime(2024, 3, 1), dt.datetime(2024, 3, 1, 0, 1))
+    )
+    time_extent_label = param.String("")
+    code_snippet = param.String("")
+    preview_dataset_html = param.String("")
+    preview_plot = param.Parameter(default=None)
+    plot_measurements = param.ListSelector(default=[], objects=[])
+
+    _last_dataset = None
+    _default_measurements = ["SiteCode", "B_OB", "B_CF"]
+
+    @property
+    def collection_id(self) -> str:
+        return VOBS_COLLECTIONS[self.collection]
+
+    @param.depends("collection", watch=True, on_init=True)
+    def _update_measurements(self) -> None:
         vires = SwarmRequest()
         try:
-            measurements = vires.available_measurements(collection)
-            self.param["vobs_measurements"].objects = measurements
-            default_measurements = self._default_measurements_by_type.get("VOBS", [])
-            self.vobs_measurements = [
-                measurement
-                for measurement in default_measurements
-                if measurement in measurements
+            measurements = vires.available_measurements(self.collection_id)
+            self.param["measurements"].objects = measurements
+            self.measurements = [
+                m for m in self._default_measurements if m in measurements
             ]
         except Exception:
-            self.param["vobs_measurements"].objects = []
-            self.vobs_measurements = []
+            self.param["measurements"].objects = []
+            self.measurements = []
 
-    @param.depends("vobs_collection", watch=True, on_init=True)
-    def _update_vobs_auto_time_range(self) -> None:
-        """Automatically adjust time range when VOBS collection changes."""
-        collection = VOBS_COLLECTIONS[self.vobs_collection]
-        start, end = _calculate_auto_time_range(collection)
-        self.vobs_time_range = (start, end)
+    @param.depends("collection", watch=True, on_init=True)
+    def _update_auto_time_range(self) -> None:
+        start, end = _calculate_auto_time_range(self.collection_id)
+        self.time_range = (start, end)
 
-    @param.depends("vobs_collection", watch=True, on_init=True)
-    def _update_vobs_time_extent_label(self) -> None:
-        collection = VOBS_COLLECTIONS[self.vobs_collection]
-        time_extent = _get_collection_time_extent(collection)
-        self.vobs_time_extent_label = _format_time_extent_label(time_extent)
+    @param.depends("collection", watch=True, on_init=True)
+    def _update_time_extent_label(self) -> None:
+        time_extent = _get_collection_time_extent(self.collection_id)
+        self.time_extent_label = _format_time_extent_label(time_extent)
 
-    @param.depends(
-        "vobs_collection",
-        "vobs_measurements",
-        "vobs_time_range",
-        watch=True,
-        on_init=True,
-    )
-    def _update_vobs_code_snippet(self) -> None:
-        collection = VOBS_COLLECTIONS[self.vobs_collection]
-        self.vobs_code_snippet = VOBS_REQUEST_TEMPLATE.format(
-            collection=collection,
-            measurements=list(self.vobs_measurements),
-            time_range=self.vobs_time_range,
+    @param.depends("collection", "measurements", "time_range", watch=True, on_init=True)
+    def _update_code_snippet(self) -> None:
+        self.code_snippet = VOBS_REQUEST_TEMPLATE.format(
+            collection=self.collection_id,
+            measurements=list(self.measurements),
+            time_range=self.time_range,
         )
 
-    @param.depends("vobs_code_snippet", watch=True, on_init=True)
-    async def _update_vobs_preview_dataset(self) -> None:
-        self.vobs_preview_dataset_html = "Loading preview..."
-        self.vobs_preview_plot = None
+    @param.depends("code_snippet", watch=True, on_init=True)
+    async def _update_preview_dataset(self) -> None:
+        self.preview_dataset_html = "Loading preview..."
+        self.preview_plot = None
         try:
-            collection = VOBS_COLLECTIONS[self.vobs_collection]
             ds = await asyncio.to_thread(
                 _build_preview_dataset,
-                collection,
-                list(self.vobs_measurements),
+                self.collection_id,
+                list(self.measurements),
                 [],
-                self.vobs_time_range,
+                self.time_range,
                 "",
             )
         except Exception as exc:
-            self.vobs_preview_dataset_html = f"Preview failed: {exc}"
+            self.preview_dataset_html = f"Preview failed: {exc}"
         else:
-            self._last_vobs_dataset = ds
-            self.vobs_preview_dataset_html = ds._repr_html_()
-            # Update vobs_plot_measurements options
-            available_measurements = [m for m in self.vobs_measurements if m in ds.data_vars]
-            self.param["vobs_plot_measurements"].objects = available_measurements
-            # Set vobs_plot_measurements to first item or all if available
+            self._last_dataset = ds
+            self.preview_dataset_html = ds._repr_html_()
+            available_measurements = [m for m in self.measurements if m in ds.data_vars]
+            self.param["plot_measurements"].objects = available_measurements
             if available_measurements:
-                self.vobs_plot_measurements = [available_measurements[0]]
-            # Generate plot
-            plot = await asyncio.to_thread(
+                self.plot_measurements = [available_measurements[0]]
+            self.preview_plot = await asyncio.to_thread(
                 _build_plot,
                 ds,
-                self.vobs_plot_measurements or list(self.vobs_measurements),
+                self.plot_measurements or list(self.measurements),
             )
-            self.vobs_preview_plot = plot
 
-    @param.depends("vobs_plot_measurements", watch=True)
-    def _update_vobs_preview_plot_on_plot_measurement_change(self) -> None:
-        """Update VOBS plot when plot measurement selection changes."""
-        if self._last_vobs_dataset is not None:
-            plot = _build_plot(self._last_vobs_dataset, list(self.vobs_plot_measurements) if self.vobs_plot_measurements else [])
-            self.vobs_preview_plot = plot
+    @param.depends("plot_measurements", watch=True)
+    def _update_preview_plot_on_measurement_change(self) -> None:
+        if self._last_dataset is not None:
+            self.preview_plot = _build_plot(
+                self._last_dataset,
+                list(self.plot_measurements) if self.plot_measurements else [],
+            )
 
 
-def _build_dashboard(state: ViresParameters) -> pn.FlexBox:
-    # MAG data handling
-    html_pane = pn.pane.HTML(
-        state.preview_dataset_html,
-        sizing_mode="stretch_both",
-        min_height=300,
-    )
+# ---------------------------------------------------------------------------
+# Dashboard builder sub-functions
+# ---------------------------------------------------------------------------
 
-    def _update_html(event: param.parameterized.Event) -> None:
-        html_pane.object = event.new
-
-    state.param.watch(_update_html, "preview_dataset_html")
-
-    collection_type_tabs = pn.layout.Tabs(
+def _build_collection_tabs(mag_state: MagState, vobs_state: VobsState) -> pn.Tabs:
+    return pn.layout.Tabs(
         pn.Param(
-            state,
+            mag_state,
             parameters=["collection_type", "collection"],
-            widgets={
-                "collection": {"type": pn.widgets.Select, "size": 6},
-            },
+            widgets={"collection": {"type": pn.widgets.Select, "size": 6}},
             name="Generic",
             sizing_mode="stretch_width",
         ),
         pn.Param(
-            state,
+            mag_state,
             parameters=["mission", "spacecraft", "variant", "mag_collection"],
             name="Magnetic (space)",
             sizing_mode="stretch_width",
         ),
         pn.Param(
-            state,
-            parameters=["vobs_collection"],
+            vobs_state,
+            parameters=["collection"],
             name="VOBS/GVO",
             sizing_mode="stretch_width",
         ),
         sizing_mode="stretch_width",
     )
 
-    measurements_tab = pn.Param(
-        state,
-        parameters=["measurements"],
-        widgets={
-            "measurements": {"type": pn.widgets.CheckBoxGroup},
-        },
-        name="Measurements",
-        sizing_mode="stretch_width",
-    )
 
-    auxiliaries_tab = pn.Param(
-        state,
-        parameters=["magnetic_model", "auxiliaries"],
-        widgets={
-            "auxiliaries": {"type": pn.widgets.CheckBoxGroup},
-        },
-        name="Auxiliaries",
-        sizing_mode="stretch_width",
-    )
-
-    vobs_measurements_tab = pn.Param(
-        state,
-        parameters=["vobs_measurements"],
-        widgets={
-            "vobs_measurements": {"type": pn.widgets.CheckBoxGroup},
-        },
-        name="Measurements",
-        sizing_mode="stretch_width",
-    )
-
-    selection_tabs = pn.layout.Tabs(
-        measurements_tab,
-        auxiliaries_tab,
-        sizing_mode="stretch_width",
-    )
-
+def _build_mag_parameters(mag_state: MagState) -> pn.Column:
     time_range_hint = pn.pane.Markdown(
-        state.time_extent_label,
+        mag_state.time_extent_label,
         sizing_mode="stretch_width",
         margin=(4, 0, 0, 0),
-        styles={"color": "#374151", "font-size": "12px"},
+        styles=_HINT_STYLES,
     )
-
-    def _update_time_extent(event: param.parameterized.Event) -> None:
-        time_range_hint.object = event.new
-
-    state.param.watch(_update_time_extent, "time_extent_label")
-
+    mag_state.param.watch(
+        lambda event: setattr(time_range_hint, "object", event.new),
+        "time_extent_label",
+    )
     time_range = pn.Param(
-        state,
+        mag_state,
         parameters=["time_range"],
-        widgets={
-            "time_range": {"type": pn.widgets.DatetimeRangePicker},
-        },
+        widgets={"time_range": {"type": pn.widgets.DatetimeRangePicker}},
         show_name=False,
         sizing_mode="stretch_width",
     )
+    selection_tabs = pn.layout.Tabs(
+        pn.Param(
+            mag_state,
+            parameters=["measurements"],
+            widgets={"measurements": {"type": pn.widgets.CheckBoxGroup}},
+            name="Measurements",
+            sizing_mode="stretch_width",
+        ),
+        pn.Param(
+            mag_state,
+            parameters=["magnetic_model", "auxiliaries"],
+            widgets={"auxiliaries": {"type": pn.widgets.CheckBoxGroup}},
+            name="Auxiliaries",
+            sizing_mode="stretch_width",
+        ),
+        sizing_mode="stretch_width",
+    )
+    return pn.Column(time_range, time_range_hint, selection_tabs, sizing_mode="stretch_width")
 
-    vobs_time_range_hint = pn.pane.Markdown(
-        state.vobs_time_extent_label,
+
+def _build_vobs_parameters(vobs_state: VobsState) -> pn.Column:
+    time_range_hint = pn.pane.Markdown(
+        vobs_state.time_extent_label,
         sizing_mode="stretch_width",
         margin=(4, 0, 0, 0),
-        styles={"color": "#374151", "font-size": "12px"},
+        styles=_HINT_STYLES,
     )
-
-    def _update_vobs_time_extent(event: param.parameterized.Event) -> None:
-        vobs_time_range_hint.object = event.new
-
-    state.param.watch(_update_vobs_time_extent, "vobs_time_extent_label")
-
-    vobs_time_range = pn.Param(
-        state,
-        parameters=["vobs_time_range"],
-        widgets={
-            "vobs_time_range": {"type": pn.widgets.DatetimeRangePicker},
-        },
+    vobs_state.param.watch(
+        lambda event: setattr(time_range_hint, "object", event.new),
+        "time_extent_label",
+    )
+    time_range = pn.Param(
+        vobs_state,
+        parameters=["time_range"],
+        widgets={"time_range": {"type": pn.widgets.DatetimeRangePicker}},
         show_name=False,
         sizing_mode="stretch_width",
     )
-
-    mag_parameters = pn.Column(
+    measurements_tab = pn.Param(
+        vobs_state,
+        parameters=["measurements"],
+        widgets={"measurements": {"type": pn.widgets.CheckBoxGroup}},
+        name="Measurements",
+        sizing_mode="stretch_width",
+    )
+    return pn.Column(
         time_range,
         time_range_hint,
-        selection_tabs,
-        sizing_mode="stretch_width",
-    )
-
-    vobs_parameters = pn.Column(
-        vobs_time_range,
-        vobs_time_range_hint,
-        vobs_measurements_tab,
+        measurements_tab,
         sizing_mode="stretch_width",
         visible=False,
     )
 
-    def _sync_parameter_visibility(active_index: int) -> None:
-        is_vobs = active_index == 2
-        mag_parameters.visible = not is_vobs
-        vobs_parameters.visible = is_vobs
 
-    def _on_collection_tab_change(event: param.parameterized.Event) -> None:
-        _sync_parameter_visibility(event.new)
-
-    collection_type_tabs.param.watch(_on_collection_tab_change, "active")
-    _sync_parameter_visibility(collection_type_tabs.active)
-
-    parameters_section = pn.Column(
-        pn.pane.Markdown("**Select parameters**", margin=(0, 0, 8, 0)),
-        mag_parameters,
-        vobs_parameters,
-        sizing_mode="stretch_width",
-        styles={
-            "border": "1px solid #a7f3d0",
-            "background": "#ecfdf3",
-            "border-radius": "8px",
-            "padding": "12px",
-        },
-    )
-
-    code_editor = pn.widgets.CodeEditor(
-        value=state.code_snippet,
+def _build_code_editor(initial_value: str) -> tuple[pn.Column, pn.widgets.CodeEditor]:
+    editor = pn.widgets.CodeEditor(
+        value=initial_value,
         height=360,
         language="python",
         readonly=True,
         print_margin=False,
         sizing_mode="stretch_width",
     )
+    section = pn.Column(
+        pn.pane.Markdown("**Code example**", margin=(0, 0, 8, 0)),
+        editor,
+        sizing_mode="stretch_width",
+        styles=_SECTION_STYLES["code"],
+    )
+    return section, editor
 
-    # Create a flexible container for plot pane that can hold HoloViews or Markdown
+
+def _build_preview_section(
+    initial_html: str,
+    plot_selector_container: pn.Column,
+) -> tuple[pn.Column, pn.pane.HTML, pn.Column]:
+    html_pane = pn.pane.HTML(initial_html, sizing_mode="stretch_both", min_height=300)
     plot_pane = pn.Column(
         pn.pane.Markdown("Plot available when data loads."),
         sizing_mode="stretch_both",
         min_height=300,
     )
-
-    plot_measurements_selector = pn.Param(
-        state,
-        parameters=["plot_measurements"],
-        widgets={
-            "plot_measurements": {"type": pn.widgets.MultiSelect, "size": 5},
-        },
-        show_name=False,
-        sizing_mode="stretch_width",
-    )
-
-    vobs_plot_measurements_selector = pn.Param(
-        state,
-        parameters=["vobs_plot_measurements"],
-        widgets={
-            "vobs_plot_measurements": {"type": pn.widgets.MultiSelect, "size": 5},
-        },
-        show_name=False,
-        sizing_mode="stretch_width",
-        visible=False,
-    )
-
-    def _update_plot(event: param.parameterized.Event) -> None:
-        if event.new is not None:
-            plot_pane.clear()
-            plot_pane.append(event.new)
-        else:
-            plot_pane.clear()
-            plot_pane.append(pn.pane.Markdown("No plot available for selected measurements."))
-
-    state.param.watch(_update_plot, "preview_plot")
-    state.param.watch(_update_plot, "vobs_preview_plot")
-
-    plot_selector_container = pn.Column(
-        pn.pane.Markdown("**Measurement to plot:**", margin=(0, 0, 4, 0), styles={"font-size": "12px"}),
-        plot_measurements_selector,
-        vobs_plot_measurements_selector,
-        sizing_mode="stretch_width",
-    )
-
-    def _sync_plot_selector_visibility(active_index: int) -> None:
-        is_vobs = collection_type_tabs.active == 2
-        plot_measurements_selector.visible = not is_vobs
-        vobs_plot_measurements_selector.visible = is_vobs
-
-    collection_type_tabs.param.watch(_sync_plot_selector_visibility, "active")
-    _sync_plot_selector_visibility(collection_type_tabs.active)
-
-    def _sync_output(active_index: int) -> None:
-        is_vobs = active_index == 2
-        code_editor.value = state.vobs_code_snippet if is_vobs else state.code_snippet
-        html_pane.object = state.vobs_preview_dataset_html if is_vobs else state.preview_dataset_html
-        # Also sync plots
-        plot_pane.clear()
-        if is_vobs:
-            if state.vobs_preview_plot is not None:
-                plot_pane.append(state.vobs_preview_plot)
-            else:
-                plot_pane.append(pn.pane.Markdown("No plot available for selected measurements."))
-        else:
-            if state.preview_plot is not None:
-                plot_pane.append(state.preview_plot)
-            else:
-                plot_pane.append(pn.pane.Markdown("No plot available for selected measurements."))
-
-    def _on_tab_change_sync(event: param.parameterized.Event) -> None:
-        _sync_output(event.new)
-
-    def _on_mag_code_update(event: param.parameterized.Event) -> None:
-        if collection_type_tabs.active != 2:
-            code_editor.value = event.new
-
-    def _on_vobs_code_update(event: param.parameterized.Event) -> None:
-        if collection_type_tabs.active == 2:
-            code_editor.value = event.new
-
-    def _on_mag_preview_update(event: param.parameterized.Event) -> None:
-        if collection_type_tabs.active != 2:
-            html_pane.object = event.new
-
-    def _on_vobs_preview_update(event: param.parameterized.Event) -> None:
-        if collection_type_tabs.active == 2:
-            html_pane.object = event.new
-
-    collection_type_tabs.param.watch(_on_tab_change_sync, "active")
-    state.param.watch(_on_mag_code_update, "code_snippet")
-    state.param.watch(_on_vobs_code_update, "vobs_code_snippet")
-    state.param.watch(_on_mag_preview_update, "preview_dataset_html")
-    state.param.watch(_on_vobs_preview_update, "vobs_preview_dataset_html")
-    _sync_output(collection_type_tabs.active)
-
-    collection_section = pn.Column(
-        pn.pane.Markdown("**Select collection**", margin=(0, 0, 8, 0)),
-        collection_type_tabs,
-        sizing_mode="stretch_width",
-        styles={
-            "border": "1px solid #c7d2fe",
-            "background": "#eef2ff",
-            "border-radius": "8px",
-            "padding": "12px",
-        },
-    )
-
-    controls_column = pn.Column(
-        collection_section,
-        parameters_section,
-        sizing_mode="stretch_height",
-        width=480,
-        margin=(0, 12, 0, 0),
-    )
-
-    code_section = pn.Column(
-        pn.pane.Markdown("**Code example**", margin=(0, 0, 8, 0)),
-        code_editor,
-        sizing_mode="stretch_width",
-        styles={
-            "border": "1px solid #fde68a",
-            "background": "#fffbeb",
-            "border-radius": "8px",
-            "padding": "12px",
-        },
-    )
-
-    # NOTE: plot_pane, plot_measurements_selector, vobs_plot_measurements_selector already defined above
-    # These were duplicates that have been removed to prevent conflicts
-
     preview_tabs = pn.layout.Tabs(
         ("Data", html_pane),
         ("Plot", pn.Column(
@@ -860,17 +694,145 @@ def _build_dashboard(state: ViresParameters) -> pn.FlexBox:
         )),
         sizing_mode="stretch_both",
     )
-
-    preview_section = pn.Column(
+    section = pn.Column(
         pn.pane.Markdown("**Preview**", margin=(0, 0, 8, 0)),
         preview_tabs,
         sizing_mode="stretch_both",
-        styles={
-            "border": "1px solid #fbcfe8",
-            "background": "#fdf2f8",
-            "border-radius": "8px",
-            "padding": "12px",
-        },
+        styles=_SECTION_STYLES["preview"],
+    )
+    return section, html_pane, plot_pane
+
+
+def _setup_tab_watchers(
+    collection_tabs: pn.Tabs,
+    mag_state: MagState,
+    vobs_state: VobsState,
+    mag_params: pn.Column,
+    vobs_params: pn.Column,
+    code_editor: pn.widgets.CodeEditor,
+    html_pane: pn.pane.HTML,
+    plot_pane: pn.Column,
+    plot_measurements_selector: pn.Param,
+    vobs_plot_measurements_selector: pn.Param,
+) -> None:
+    def _no_plot_message() -> pn.pane.Markdown:
+        return pn.pane.Markdown("No plot available for selected measurements.")
+
+    def _sync_all(active_index: int) -> None:
+        is_vobs = active_index == VOBS_TAB
+        mag_params.visible = not is_vobs
+        vobs_params.visible = is_vobs
+        plot_measurements_selector.visible = not is_vobs
+        vobs_plot_measurements_selector.visible = is_vobs
+        state = vobs_state if is_vobs else mag_state
+        code_editor.value = state.code_snippet
+        html_pane.object = state.preview_dataset_html
+        plot_pane.clear()
+        if state.preview_plot is not None:
+            plot_pane.append(state.preview_plot)
+        else:
+            plot_pane.append(_no_plot_message())
+
+    collection_tabs.param.watch(lambda event: _sync_all(event.new), "active")
+    _sync_all(collection_tabs.active)
+
+    def _update_plot(event: param.parameterized.Event) -> None:
+        if event.new is not None:
+            plot_pane.clear()
+            plot_pane.append(event.new)
+        else:
+            plot_pane.clear()
+            plot_pane.append(_no_plot_message())
+
+    def _on_mag_code_update(event: param.parameterized.Event) -> None:
+        if collection_tabs.active != VOBS_TAB:
+            code_editor.value = event.new
+
+    def _on_vobs_code_update(event: param.parameterized.Event) -> None:
+        if collection_tabs.active == VOBS_TAB:
+            code_editor.value = event.new
+
+    def _on_mag_preview_update(event: param.parameterized.Event) -> None:
+        if collection_tabs.active != VOBS_TAB:
+            html_pane.object = event.new
+
+    def _on_vobs_preview_update(event: param.parameterized.Event) -> None:
+        if collection_tabs.active == VOBS_TAB:
+            html_pane.object = event.new
+
+    mag_state.param.watch(_update_plot, "preview_plot")
+    vobs_state.param.watch(_update_plot, "preview_plot")
+    mag_state.param.watch(_on_mag_code_update, "code_snippet")
+    vobs_state.param.watch(_on_vobs_code_update, "code_snippet")
+    mag_state.param.watch(_on_mag_preview_update, "preview_dataset_html")
+    vobs_state.param.watch(_on_vobs_preview_update, "preview_dataset_html")
+
+
+def _build_dashboard(mag_state: MagState, vobs_state: VobsState) -> pn.Row:
+    collection_tabs = _build_collection_tabs(mag_state, vobs_state)
+    mag_params = _build_mag_parameters(mag_state)
+    vobs_params = _build_vobs_parameters(vobs_state)
+
+    parameters_section = pn.Column(
+        pn.pane.Markdown("**Select parameters**", margin=(0, 0, 8, 0)),
+        mag_params,
+        vobs_params,
+        sizing_mode="stretch_width",
+        styles=_SECTION_STYLES["parameters"],
+    )
+    collection_section = pn.Column(
+        pn.pane.Markdown("**Select collection**", margin=(0, 0, 8, 0)),
+        collection_tabs,
+        sizing_mode="stretch_width",
+        styles=_SECTION_STYLES["collection"],
+    )
+    controls_column = pn.Column(
+        collection_section,
+        parameters_section,
+        sizing_mode="stretch_height",
+        width=480,
+        margin=(0, 12, 0, 0),
+    )
+
+    plot_measurements_selector = pn.Param(
+        mag_state,
+        parameters=["plot_measurements"],
+        widgets={"plot_measurements": {"type": pn.widgets.MultiSelect, "size": 5}},
+        show_name=False,
+        sizing_mode="stretch_width",
+    )
+    vobs_plot_measurements_selector = pn.Param(
+        vobs_state,
+        parameters=["plot_measurements"],
+        widgets={"plot_measurements": {"type": pn.widgets.MultiSelect, "size": 5}},
+        show_name=False,
+        sizing_mode="stretch_width",
+        visible=False,
+    )
+    plot_selector_container = pn.Column(
+        pn.pane.Markdown("**Measurement to plot:**", margin=(0, 0, 4, 0), styles={"font-size": "12px"}),
+        plot_measurements_selector,
+        vobs_plot_measurements_selector,
+        sizing_mode="stretch_width",
+    )
+
+    code_section, code_editor = _build_code_editor(mag_state.code_snippet)
+    preview_section, html_pane, plot_pane = _build_preview_section(
+        mag_state.preview_dataset_html,
+        plot_selector_container,
+    )
+
+    _setup_tab_watchers(
+        collection_tabs,
+        mag_state,
+        vobs_state,
+        mag_params,
+        vobs_params,
+        code_editor,
+        html_pane,
+        plot_pane,
+        plot_measurements_selector,
+        vobs_plot_measurements_selector,
     )
 
     preview_column = pn.Column(
@@ -879,14 +841,14 @@ def _build_dashboard(state: ViresParameters) -> pn.FlexBox:
         sizing_mode="stretch_both",
         min_width=360,
     )
-
-    return pn.Row(
-        controls_column,
-        preview_column,
-        sizing_mode="stretch_both",
-    )
+    return pn.Row(controls_column, preview_column, sizing_mode="stretch_both")
 
 
-parameter_state = ViresParameters()
-dashboard = _build_dashboard(parameter_state)
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+mag_state = MagState()
+vobs_state = VobsState()
+dashboard = _build_dashboard(mag_state, vobs_state)
 dashboard.servable()
