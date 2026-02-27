@@ -88,7 +88,7 @@ data = request.get_between(
     asynchronous=False,
     show_progress=False,
 )
-ds = data.as_xarray(reshape=False)"""
+ds = data.as_xarray(reshape=True)"""
 
 # ---------------------------------------------------------------------------
 # Collection data
@@ -298,6 +298,7 @@ def _build_preview_dataset(
     auxiliaries: List[str],
     time_range: tuple[dt.datetime, dt.datetime],
     magnetic_model: str,
+    reshape: bool = False,
 ):
     request = SwarmRequest()
     request.set_collection(collection, verbose=False)
@@ -312,7 +313,7 @@ def _build_preview_dataset(
         asynchronous=False,
         show_progress=False,
     )
-    return data.as_xarray()
+    return data.as_xarray(reshape=reshape)
 
 
 def _build_plot(ds, measurements: List[str]) -> Optional[object]:
@@ -527,6 +528,7 @@ class VobsState(param.Parameterized):
                 [],
                 self.time_range,
                 "",
+                True,
             )
         except Exception as exc:
             self.preview_dataset_html = f"Preview failed: {exc}"
