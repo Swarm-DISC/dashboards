@@ -5,6 +5,8 @@ from typing import Dict, List, Optional, Tuple
 import panel as pn
 import param
 from viresclient import SwarmRequest
+import hvplot.xarray  # noqa: F401
+import holoviews as hv  # noqa: F401
 
 pn.extension("codeeditor")
 if pn.state.curdoc is not None:
@@ -224,6 +226,50 @@ def _build_preview_dataset(
     return data.as_xarray()
 
 
+def _build_plot(ds, measurements: List[str]) -> Optional[object]:
+    """Generate holoviz plots from xarray dataset for selected measurements."""
+    import holoviews as hv
+    from holoviews import opts
+
+    if ds is None or not measurements:
+        return None
+
+    try:
+        plots = []
+        for measurement in measurements:
+            if measurement in ds.data_vars:
+                var = ds[measurement]
+                # Skip non-numeric data
+                if not hasattr(var, 'values') or not var.dtype.kind in 'biufc':
+                    continue
+                # Handle different dimensions
+                if "Timestamp" in var.dims:
+                    p = var.hvplot.line(
+                        x="Timestamp",
+                        label=measurement,
+                        height=250,
+                        width=700,
+                    )
+                    plots.append(p)
+
+        if not plots:
+            return None
+
+        # Combine plots using overlay or layout
+        if len(plots) == 1:
+            return plots[0]
+        else:
+            # Stack plots vertically
+            return hv.Layout(plots).cols(1).opts(
+                opts.Layout(shared_axes=False),
+            )
+    except Exception as e:
+        import traceback
+        print(f"Plot generation failed: {e}")
+        traceback.print_exc()
+        return None
+
+
 _TIME_EXTENT_CACHE: Dict[str, Optional[Tuple[str, str]]] = {}
 
 
@@ -296,6 +342,7 @@ class ViresParameters(param.Parameterized):
     time_extent_label = param.String("")
     code_snippet = param.String("")
     preview_dataset_html = param.String("")
+    preview_plot = param.Parameter(default=None)
 
     mission = param.Selector(default="Swarm", objects=list(MAG_COLLECTIONS.keys()))
     spacecraft = param.Selector()
@@ -308,6 +355,13 @@ class ViresParameters(param.Parameterized):
     vobs_time_extent_label = param.String("")
     vobs_code_snippet = param.String("")
     vobs_preview_dataset_html = param.String("")
+    vobs_preview_plot = param.Parameter(default=None)
+
+    plot_measurements = param.ListSelector(default=[], objects=[])
+    vobs_plot_measurements = param.ListSelector(default=[], objects=[])
+
+    _last_dataset = None
+    _last_vobs_dataset = None
 
     _default_measurements_by_type = {
         "MAG": ["B_NEC"],
@@ -350,6 +404,7 @@ class ViresParameters(param.Parameterized):
     @param.depends("code_snippet", watch=True, on_init=True)
     async def _update_preview_dataset(self) -> None:
         self.preview_dataset_html = "Loading preview..."
+        self.preview_plot = None
         try:
             ds = await asyncio.to_thread(
                 _build_preview_dataset,
@@ -362,7 +417,28 @@ class ViresParameters(param.Parameterized):
         except Exception as exc:
             self.preview_dataset_html = f"Preview failed: {exc}"
         else:
+            self._last_dataset = ds
             self.preview_dataset_html = ds._repr_html_()
+            # Update plot_measurements options
+            available_measurements = [m for m in self.measurements if m in ds.data_vars]
+            self.param["plot_measurements"].objects = available_measurements
+            # Set plot_measurements to first item or all if available
+            if available_measurements:
+                self.plot_measurements = [available_measurements[0]]
+            # Generate plot
+            plot = await asyncio.to_thread(
+                _build_plot,
+                ds,
+                self.plot_measurements or list(self.measurements),
+            )
+            self.preview_plot = plot
+
+    @param.depends("plot_measurements", watch=True)
+    def _update_preview_plot_on_plot_measurement_change(self) -> None:
+        """Update plot when plot measurement selection changes."""
+        if self._last_dataset is not None:
+            plot = _build_plot(self._last_dataset, list(self.plot_measurements) if self.plot_measurements else [])
+            self.preview_plot = plot
 
     @param.depends("mission", watch=True, on_init=True)
     def _update_spacecraft(self) -> None:
@@ -439,6 +515,7 @@ class ViresParameters(param.Parameterized):
     @param.depends("vobs_code_snippet", watch=True, on_init=True)
     async def _update_vobs_preview_dataset(self) -> None:
         self.vobs_preview_dataset_html = "Loading preview..."
+        self.vobs_preview_plot = None
         try:
             collection = VOBS_COLLECTIONS[self.vobs_collection]
             ds = await asyncio.to_thread(
@@ -452,7 +529,28 @@ class ViresParameters(param.Parameterized):
         except Exception as exc:
             self.vobs_preview_dataset_html = f"Preview failed: {exc}"
         else:
+            self._last_vobs_dataset = ds
             self.vobs_preview_dataset_html = ds._repr_html_()
+            # Update vobs_plot_measurements options
+            available_measurements = [m for m in self.vobs_measurements if m in ds.data_vars]
+            self.param["vobs_plot_measurements"].objects = available_measurements
+            # Set vobs_plot_measurements to first item or all if available
+            if available_measurements:
+                self.vobs_plot_measurements = [available_measurements[0]]
+            # Generate plot
+            plot = await asyncio.to_thread(
+                _build_plot,
+                ds,
+                self.vobs_plot_measurements or list(self.vobs_measurements),
+            )
+            self.vobs_preview_plot = plot
+
+    @param.depends("vobs_plot_measurements", watch=True)
+    def _update_vobs_preview_plot_on_plot_measurement_change(self) -> None:
+        """Update VOBS plot when plot measurement selection changes."""
+        if self._last_vobs_dataset is not None:
+            plot = _build_plot(self._last_vobs_dataset, list(self.vobs_plot_measurements) if self.vobs_plot_measurements else [])
+            self.vobs_preview_plot = plot
 
 
 def _build_dashboard(state: ViresParameters) -> pn.FlexBox:
@@ -621,10 +719,76 @@ def _build_dashboard(state: ViresParameters) -> pn.FlexBox:
         sizing_mode="stretch_width",
     )
 
+    # Create a flexible container for plot pane that can hold HoloViews or Markdown
+    plot_pane = pn.Column(
+        pn.pane.Markdown("Plot available when data loads."),
+        sizing_mode="stretch_both",
+        min_height=300,
+    )
+
+    plot_measurements_selector = pn.Param(
+        state,
+        parameters=["plot_measurements"],
+        widgets={
+            "plot_measurements": {"type": pn.widgets.Select, "size": 1},
+        },
+        show_name=False,
+        sizing_mode="stretch_width",
+    )
+
+    vobs_plot_measurements_selector = pn.Param(
+        state,
+        parameters=["vobs_plot_measurements"],
+        widgets={
+            "vobs_plot_measurements": {"type": pn.widgets.Select, "size": 1},
+        },
+        show_name=False,
+        sizing_mode="stretch_width",
+        visible=False,
+    )
+
+    def _update_plot(event: param.parameterized.Event) -> None:
+        if event.new is not None:
+            plot_pane.clear()
+            plot_pane.append(event.new)
+        else:
+            plot_pane.clear()
+            plot_pane.append(pn.pane.Markdown("No plot available for selected measurements."))
+
+    state.param.watch(_update_plot, "preview_plot")
+    state.param.watch(_update_plot, "vobs_preview_plot")
+
+    plot_selector_container = pn.Column(
+        pn.pane.Markdown("**Measurement to plot:**", margin=(0, 0, 4, 0), styles={"font-size": "12px"}),
+        plot_measurements_selector,
+        vobs_plot_measurements_selector,
+        sizing_mode="stretch_width",
+    )
+
+    def _sync_plot_selector_visibility(active_index: int) -> None:
+        is_vobs = collection_type_tabs.active == 2
+        plot_measurements_selector.visible = not is_vobs
+        vobs_plot_measurements_selector.visible = is_vobs
+
+    collection_type_tabs.param.watch(_sync_plot_selector_visibility, "active")
+    _sync_plot_selector_visibility(collection_type_tabs.active)
+
     def _sync_output(active_index: int) -> None:
         is_vobs = active_index == 2
         code_editor.value = state.vobs_code_snippet if is_vobs else state.code_snippet
         html_pane.object = state.vobs_preview_dataset_html if is_vobs else state.preview_dataset_html
+        # Also sync plots
+        plot_pane.clear()
+        if is_vobs:
+            if state.vobs_preview_plot is not None:
+                plot_pane.append(state.vobs_preview_plot)
+            else:
+                plot_pane.append(pn.pane.Markdown("No plot available for selected measurements."))
+        else:
+            if state.preview_plot is not None:
+                plot_pane.append(state.preview_plot)
+            else:
+                plot_pane.append(pn.pane.Markdown("No plot available for selected measurements."))
 
     def _on_tab_change_sync(event: param.parameterized.Event) -> None:
         _sync_output(event.new)
@@ -684,9 +848,16 @@ def _build_dashboard(state: ViresParameters) -> pn.FlexBox:
         },
     )
 
+    # NOTE: plot_pane, plot_measurements_selector, vobs_plot_measurements_selector already defined above
+    # These were duplicates that have been removed to prevent conflicts
+
     preview_tabs = pn.layout.Tabs(
         ("Data", html_pane),
-        ("Plot", pn.pane.Markdown("Plot preview coming next.", margin=(8, 0, 0, 0))),
+        ("Plot", pn.Column(
+            plot_selector_container,
+            plot_pane,
+            sizing_mode="stretch_both",
+        )),
         sizing_mode="stretch_both",
     )
 

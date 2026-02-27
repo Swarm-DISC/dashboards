@@ -9,4 +9,10 @@ dependencies = [
     "panel",
     "param",
     "nbconvert",
+    "hvplot>=0.12.2",
+]
+
+[dependency-groups]
+dev = [
+    "watchfiles>=1.1.1",
 ]
