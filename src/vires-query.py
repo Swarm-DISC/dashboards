@@ -574,16 +574,7 @@ def _build_parameters(state: QueryState) -> pn.Column:
         widgets={"auxiliaries": {"type": pn.widgets.CheckBoxGroup}},
         name="Auxiliaries",
         sizing_mode="stretch_width",
-        visible=not state.is_vobs,
     )
-
-    def _update_auxiliaries_visibility(event: param.parameterized.Event) -> None:
-        is_vobs = event.new == _VOBS_COLLECTION_TYPE
-        auxiliaries_param.visible = not is_vobs
-        if is_vobs and selection_tabs.active == 1:
-            selection_tabs.active = 0
-
-    state.param.watch(_update_auxiliaries_visibility, "collection_type")
 
     selection_tabs = pn.layout.Tabs(
         measurements_param,
@@ -593,50 +584,6 @@ def _build_parameters(state: QueryState) -> pn.Column:
     return pn.Column(time_range, time_range_hint, selection_tabs, sizing_mode="stretch_width")
 
 
-def _build_code_editor(initial_value: str) -> tuple[pn.Column, pn.widgets.CodeEditor]:
-    editor = pn.widgets.CodeEditor(
-        value=initial_value,
-        height=360,
-        language="python",
-        readonly=True,
-        print_margin=False,
-        sizing_mode="stretch_width",
-    )
-    section = pn.Column(
-        pn.pane.Markdown("**Code example**", margin=(0, 0, 8, 0)),
-        editor,
-        sizing_mode="stretch_width",
-        styles=_SECTION_STYLES["code"],
-    )
-    return section, editor
-
-
-def _build_preview_section(
-    initial_html: str,
-    plot_selector_container: pn.Column,
-) -> tuple[pn.Column, pn.pane.HTML, pn.Column]:
-    html_pane = pn.pane.HTML(initial_html, sizing_mode="stretch_both", min_height=300)
-    plot_pane = pn.Column(
-        pn.pane.Markdown("Plot available when data loads."),
-        sizing_mode="stretch_both",
-        min_height=300,
-    )
-    preview_tabs = pn.layout.Tabs(
-        ("Data", html_pane),
-        ("Plot", pn.Column(
-            plot_selector_container,
-            plot_pane,
-            sizing_mode="stretch_both",
-        )),
-        sizing_mode="stretch_both",
-    )
-    section = pn.Column(
-        pn.pane.Markdown("**Preview**", margin=(0, 0, 8, 0)),
-        preview_tabs,
-        sizing_mode="stretch_both",
-        styles=_SECTION_STYLES["preview"],
-    )
-    return section, html_pane, plot_pane
 
 
 def _setup_watchers(
@@ -723,10 +670,25 @@ def _build_dashboard(state: QueryState) -> pn.template.FastListTemplate:
         sizing_mode="stretch_width",
     )
 
-    code_section, code_editor = _build_code_editor(state.code_snippet)
-    preview_section, html_pane, plot_pane = _build_preview_section(
-        state.preview_dataset_html,
-        plot_selector_container,
+    code_editor = pn.widgets.CodeEditor(
+        value=state.code_snippet,
+        height=400,
+        language="python",
+        readonly=True,
+        print_margin=False,
+        sizing_mode="stretch_width",
+    )
+    html_pane = pn.pane.HTML(state.preview_dataset_html, sizing_mode="stretch_both", min_height=300)
+    plot_pane = pn.Column(
+        pn.pane.Markdown("Plot available when data loads."),
+        sizing_mode="stretch_both",
+        min_height=300,
+    )
+    main_tabs = pn.layout.Tabs(
+        ("Code", code_editor),
+        ("Data", html_pane),
+        ("Plot", pn.Column(plot_selector_container, plot_pane, sizing_mode="stretch_both")),
+        sizing_mode="stretch_both",
     )
 
     _setup_watchers(collection_tabs, state, code_editor, html_pane, plot_pane)
@@ -734,7 +696,7 @@ def _build_dashboard(state: QueryState) -> pn.template.FastListTemplate:
     return pn.template.FastListTemplate(
         title="VirES Query Builder",
         sidebar=[collection_section, parameters_section],
-        main=[_build_header_banner(), code_section, preview_section],
+        main=[_build_header_banner(), main_tabs],
         sidebar_width=380,
         header_background="#1d4ed8",
         accent="#2563eb",
