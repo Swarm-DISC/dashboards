@@ -766,30 +766,50 @@ def _setup_tab_watchers(
     vobs_state.param.watch(_on_vobs_preview_update, "preview_dataset_html")
 
 
-def _build_dashboard(mag_state: MagState, vobs_state: VobsState) -> pn.Row:
+def _build_header_banner() -> pn.pane.HTML:
+    return pn.pane.HTML(
+        """
+        <div style="
+            background: #f0f9ff;
+            border-left: 4px solid #2563eb;
+            padding: 16px 20px;
+            border-radius: 0 8px 8px 0;
+            margin-bottom: 4px;
+        ">
+            <h2 style="margin: 0 0 6px 0; color: #1e3a5f; font-size: 17px; font-weight: 600;">
+                VirES Query Builder
+            </h2>
+            <p style="margin: 0; font-size: 13px; color: #475569; line-height: 1.6;">
+                Browse collections from the
+                <a href="https://vires.services" style="color: #2563eb;" target="_blank">VirES for Swarm</a>
+                service. Select a collection, configure measurements and time range, then copy the
+                generated
+                <a href="https://viresclient.readthedocs.io" style="color: #2563eb;" target="_blank">viresclient</a>
+                code into your own Python environment. A small data preview loads automatically.
+            </p>
+        </div>
+        """,
+        sizing_mode="stretch_width",
+    )
+
+
+def _build_dashboard(mag_state: MagState, vobs_state: VobsState) -> pn.template.FastListTemplate:
     collection_tabs = _build_collection_tabs(mag_state, vobs_state)
     mag_params = _build_mag_parameters(mag_state)
     vobs_params = _build_vobs_parameters(vobs_state)
 
-    parameters_section = pn.Column(
-        pn.pane.Markdown("**Select parameters**", margin=(0, 0, 8, 0)),
-        mag_params,
-        vobs_params,
-        sizing_mode="stretch_width",
-        styles=_SECTION_STYLES["parameters"],
-    )
     collection_section = pn.Column(
         pn.pane.Markdown("**Select collection**", margin=(0, 0, 8, 0)),
         collection_tabs,
         sizing_mode="stretch_width",
         styles=_SECTION_STYLES["collection"],
     )
-    controls_column = pn.Column(
-        collection_section,
-        parameters_section,
-        sizing_mode="stretch_height",
-        width=480,
-        margin=(0, 12, 0, 0),
+    parameters_section = pn.Column(
+        pn.pane.Markdown("**Select parameters**", margin=(0, 0, 8, 0)),
+        mag_params,
+        vobs_params,
+        sizing_mode="stretch_width",
+        styles=_SECTION_STYLES["parameters"],
     )
 
     plot_measurements_selector = pn.Param(
@@ -833,13 +853,15 @@ def _build_dashboard(mag_state: MagState, vobs_state: VobsState) -> pn.Row:
         vobs_plot_measurements_selector,
     )
 
-    preview_column = pn.Column(
-        code_section,
-        preview_section,
-        sizing_mode="stretch_both",
-        min_width=360,
+    return pn.template.FastListTemplate(
+        title="VirES Query Builder",
+        sidebar=[collection_section, parameters_section],
+        main=[_build_header_banner(), code_section, preview_section],
+        sidebar_width=380,
+        header_background="#1d4ed8",
+        accent="#2563eb",
+        theme_toggle=False,
     )
-    return pn.Row(controls_column, preview_column, sizing_mode="stretch_both")
 
 
 # ---------------------------------------------------------------------------
