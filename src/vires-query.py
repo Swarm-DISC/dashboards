@@ -161,6 +161,12 @@ def _load_metadata() -> tuple[Dict[str, List[str]], Dict[str, List[str]], List[s
 
 COLLECTION_MAP, MEASUREMENTS_BY_COLLECTION, AUXILIARIES, MAG_MODELS, COLLECTIONS_TO_TYPES, COLLECTION_SAMPLING_STEPS = _load_metadata()
 
+# Derive the VirES collection-type key for VOBS collections at startup.
+# COLLECTIONS_TO_TYPES maps collection IDs → type keys; fall back to "VOBS".
+_VOBS_COLLECTION_TYPE: str = COLLECTIONS_TO_TYPES.get(
+    next(iter(VOBS_COLLECTIONS.values())), "VOBS"
+)
+
 # ---------------------------------------------------------------------------
 # Utility functions
 # ---------------------------------------------------------------------------
@@ -350,10 +356,11 @@ def _build_plot(ds, measurements: List[str]) -> Optional[object]:
 
 
 # ---------------------------------------------------------------------------
-# State classes
+# State class
 # ---------------------------------------------------------------------------
 
-class MagState(param.Parameterized):
+class QueryState(param.Parameterized):
+    # --- Generic collection selection ---
     collection_type = param.Selector(default="MAG", objects=list(COLLECTION_MAP.keys()))
     collection = param.Selector(objects=COLLECTION_MAP["MAG"])
     measurements = param.ListSelector(default=[], objects=MEASUREMENTS_BY_COLLECTION["MAG"])
@@ -366,20 +373,46 @@ class MagState(param.Parameterized):
     preview_plot = param.Parameter(default=None)
     plot_measurements = param.ListSelector(default=[], objects=[])
 
+    # --- Magnetic (space) collection selection ---
     mission = param.Selector(default="Swarm", objects=list(MAG_COLLECTIONS.keys()))
     spacecraft = param.Selector()
     variant = param.Selector()
 
+    # --- VOBS/GVO collection selection ---
+    vobs_collection_label = param.Selector(
+        default="Swarm (1-monthly)",
+        objects=list(VOBS_COLLECTIONS.keys()),
+        label="Collection",
+    )
+
     _last_dataset = None
-    _default_measurements_by_type = {"MAG": ["B_NEC"]}
+    _default_measurements_by_type = {
+        "MAG": ["B_NEC"],
+        _VOBS_COLLECTION_TYPE: ["SiteCode", "B_OB", "B_CF"],
+    }
+
+    @property
+    def is_vobs(self) -> bool:
+        return self.collection_type == _VOBS_COLLECTION_TYPE
+
+    # --- Generic tab handlers ---
 
     @param.depends("collection_type", watch=True, on_init=True)
     def _update_collections_and_measurements(self) -> None:
-        self.measurements = list(self._default_measurements_by_type.get(self.collection_type, []))
-        collections = COLLECTION_MAP[self.collection_type]
-        self.param["collection"].objects = collections
-        self.collection = collections[0]
+        # Update objects before values so ListSelector validation doesn't drop them.
         self.param["measurements"].objects = MEASUREMENTS_BY_COLLECTION[self.collection_type]
+        self.measurements = list(self._default_measurements_by_type.get(self.collection_type, []))
+        # VOBS collections span multiple VirES type keys, so use the full VOBS_COLLECTIONS
+        # list as objects rather than just the single-type slice from COLLECTION_MAP.
+        if self.is_vobs:
+            collections = list(VOBS_COLLECTIONS.values())
+            preferred = VOBS_COLLECTIONS.get(self.vobs_collection_label)
+            self.param["collection"].objects = collections
+            self.collection = preferred if preferred in collections else collections[0]
+        else:
+            collections = COLLECTION_MAP[self.collection_type]
+            self.param["collection"].objects = collections
+            self.collection = collections[0]
 
     @param.depends(
         "collection",
@@ -391,13 +424,20 @@ class MagState(param.Parameterized):
         on_init=True,
     )
     def _update_code_snippet(self) -> None:
-        self.code_snippet = _render_request_snippet(
-            collection=self.collection,
-            measurements=self.measurements,
-            auxiliaries=self.auxiliaries,
-            time_range=self.time_range,
-            magnetic_model=self.magnetic_model,
-        )
+        if self.is_vobs:
+            self.code_snippet = VOBS_REQUEST_TEMPLATE.format(
+                collection=self.collection,
+                measurements=list(self.measurements),
+                time_range=self.time_range,
+            )
+        else:
+            self.code_snippet = _render_request_snippet(
+                collection=self.collection,
+                measurements=self.measurements,
+                auxiliaries=self.auxiliaries,
+                time_range=self.time_range,
+                magnetic_model=self.magnetic_model,
+            )
 
     @param.depends("collection", watch=True, on_init=True)
     def _update_time_extent_label(self) -> None:
@@ -413,9 +453,10 @@ class MagState(param.Parameterized):
                 _build_preview_dataset,
                 self.collection,
                 list(self.measurements),
-                list(self.auxiliaries),
+                [] if self.is_vobs else list(self.auxiliaries),
                 self.time_range,
-                self.magnetic_model,
+                "" if self.is_vobs else self.magnetic_model,
+                self.is_vobs,
             )
         except Exception as exc:
             self.preview_dataset_html = f"Preview failed: {exc}"
@@ -440,6 +481,13 @@ class MagState(param.Parameterized):
                 list(self.plot_measurements) if self.plot_measurements else [],
             )
 
+    @param.depends("collection", watch=True, on_init=True)
+    def _update_auto_time_range(self) -> None:
+        start, end = _calculate_auto_time_range(self.collection)
+        self.time_range = (start, end)
+
+    # --- Magnetic (space) tab handlers ---
+
     @param.depends("mission", watch=True, on_init=True)
     def _update_spacecraft(self) -> None:
         spacecrafts = list(MAG_COLLECTIONS[self.mission].keys())
@@ -458,124 +506,36 @@ class MagState(param.Parameterized):
         self.collection_type = COLLECTIONS_TO_TYPES[mag_collection]
         self.collection = mag_collection
 
-    @param.depends("collection", watch=True, on_init=True)
-    def _update_auto_time_range(self) -> None:
-        start, end = _calculate_auto_time_range(self.collection)
-        self.time_range = (start, end)
+    # --- VOBS/GVO tab handlers ---
 
-
-class VobsState(param.Parameterized):
-    collection = param.Selector(
-        default="Swarm (1-monthly)", objects=list(VOBS_COLLECTIONS.keys())
-    )
-    measurements = param.ListSelector(default=[], objects=[])
-    time_range = param.DateRange(
-        default=(dt.datetime(2024, 3, 1), dt.datetime(2024, 3, 1, 0, 1))
-    )
-    time_extent_label = param.String("")
-    code_snippet = param.String("")
-    preview_dataset_html = param.String("")
-    preview_plot = param.Parameter(default=None)
-    plot_measurements = param.ListSelector(default=[], objects=[])
-
-    _last_dataset = None
-    _default_measurements = ["SiteCode", "B_OB", "B_CF"]
-
-    @property
-    def collection_id(self) -> str:
-        return VOBS_COLLECTIONS[self.collection]
-
-    @param.depends("collection", watch=True, on_init=True)
-    def _update_measurements(self) -> None:
-        vires = SwarmRequest()
-        try:
-            measurements = vires.available_measurements(self.collection_id)
-            self.param["measurements"].objects = measurements
-            self.measurements = [
-                m for m in self._default_measurements if m in measurements
-            ]
-        except Exception:
-            self.param["measurements"].objects = []
-            self.measurements = []
-
-    @param.depends("collection", watch=True, on_init=True)
-    def _update_auto_time_range(self) -> None:
-        start, end = _calculate_auto_time_range(self.collection_id)
-        self.time_range = (start, end)
-
-    @param.depends("collection", watch=True, on_init=True)
-    def _update_time_extent_label(self) -> None:
-        time_extent = _get_collection_time_extent(self.collection_id)
-        self.time_extent_label = _format_time_extent_label(time_extent)
-
-    @param.depends("collection", "measurements", "time_range", watch=True, on_init=True)
-    def _update_code_snippet(self) -> None:
-        self.code_snippet = VOBS_REQUEST_TEMPLATE.format(
-            collection=self.collection_id,
-            measurements=list(self.measurements),
-            time_range=self.time_range,
-        )
-
-    @param.depends("code_snippet", watch=True, on_init=True)
-    async def _update_preview_dataset(self) -> None:
-        self.preview_dataset_html = "Loading preview..."
-        self.preview_plot = None
-        try:
-            ds = await asyncio.to_thread(
-                _build_preview_dataset,
-                self.collection_id,
-                list(self.measurements),
-                [],
-                self.time_range,
-                "",
-                True,
-            )
-        except Exception as exc:
-            self.preview_dataset_html = f"Preview failed: {exc}"
-        else:
-            self._last_dataset = ds
-            self.preview_dataset_html = ds._repr_html_()
-            available_measurements = [m for m in self.measurements if m in ds.data_vars]
-            self.param["plot_measurements"].objects = available_measurements
-            if available_measurements:
-                self.plot_measurements = [available_measurements[0]]
-            self.preview_plot = await asyncio.to_thread(
-                _build_plot,
-                ds,
-                self.plot_measurements or list(self.measurements),
-            )
-
-    @param.depends("plot_measurements", watch=True)
-    def _update_preview_plot_on_measurement_change(self) -> None:
-        if self._last_dataset is not None:
-            self.preview_plot = _build_plot(
-                self._last_dataset,
-                list(self.plot_measurements) if self.plot_measurements else [],
-            )
+    @param.depends("vobs_collection_label", watch=True)
+    def _update_vobs_collection(self) -> None:
+        if self.is_vobs:
+            self.collection = VOBS_COLLECTIONS[self.vobs_collection_label]
 
 
 # ---------------------------------------------------------------------------
 # Dashboard builder sub-functions
 # ---------------------------------------------------------------------------
 
-def _build_collection_tabs(mag_state: MagState, vobs_state: VobsState) -> pn.Tabs:
+def _build_collection_tabs(state: QueryState) -> pn.Tabs:
     return pn.layout.Tabs(
         pn.Param(
-            mag_state,
+            state,
             parameters=["collection_type", "collection"],
             widgets={"collection": {"type": pn.widgets.Select, "size": 6}},
             name="Generic",
             sizing_mode="stretch_width",
         ),
         pn.Param(
-            mag_state,
+            state,
             parameters=["mission", "spacecraft", "variant"],
             name="Magnetic (space)",
             sizing_mode="stretch_width",
         ),
         pn.Param(
-            vobs_state,
-            parameters=["collection"],
+            state,
+            parameters=["vobs_collection_label"],
             name="VOBS/GVO",
             sizing_mode="stretch_width",
         ),
@@ -583,76 +543,54 @@ def _build_collection_tabs(mag_state: MagState, vobs_state: VobsState) -> pn.Tab
     )
 
 
-def _build_mag_parameters(mag_state: MagState) -> pn.Column:
+def _build_parameters(state: QueryState) -> pn.Column:
     time_range_hint = pn.pane.Markdown(
-        mag_state.time_extent_label,
+        state.time_extent_label,
         sizing_mode="stretch_width",
         margin=(4, 0, 0, 0),
         styles=_HINT_STYLES,
     )
-    mag_state.param.watch(
+    state.param.watch(
         lambda event: setattr(time_range_hint, "object", event.new),
         "time_extent_label",
     )
     time_range = pn.Param(
-        mag_state,
+        state,
         parameters=["time_range"],
         widgets={"time_range": {"type": pn.widgets.DatetimeRangePicker}},
         show_name=False,
         sizing_mode="stretch_width",
     )
-    selection_tabs = pn.layout.Tabs(
-        pn.Param(
-            mag_state,
-            parameters=["measurements"],
-            widgets={"measurements": {"type": pn.widgets.CheckBoxGroup}},
-            name="Measurements",
-            sizing_mode="stretch_width",
-        ),
-        pn.Param(
-            mag_state,
-            parameters=["magnetic_model", "auxiliaries"],
-            widgets={"auxiliaries": {"type": pn.widgets.CheckBoxGroup}},
-            name="Auxiliaries",
-            sizing_mode="stretch_width",
-        ),
-        sizing_mode="stretch_width",
-    )
-    return pn.Column(time_range, time_range_hint, selection_tabs, sizing_mode="stretch_width")
-
-
-def _build_vobs_parameters(vobs_state: VobsState) -> pn.Column:
-    time_range_hint = pn.pane.Markdown(
-        vobs_state.time_extent_label,
-        sizing_mode="stretch_width",
-        margin=(4, 0, 0, 0),
-        styles=_HINT_STYLES,
-    )
-    vobs_state.param.watch(
-        lambda event: setattr(time_range_hint, "object", event.new),
-        "time_extent_label",
-    )
-    time_range = pn.Param(
-        vobs_state,
-        parameters=["time_range"],
-        widgets={"time_range": {"type": pn.widgets.DatetimeRangePicker}},
-        show_name=False,
-        sizing_mode="stretch_width",
-    )
-    measurements_tab = pn.Param(
-        vobs_state,
+    measurements_param = pn.Param(
+        state,
         parameters=["measurements"],
         widgets={"measurements": {"type": pn.widgets.CheckBoxGroup}},
         name="Measurements",
         sizing_mode="stretch_width",
     )
-    return pn.Column(
-        time_range,
-        time_range_hint,
-        measurements_tab,
+    auxiliaries_param = pn.Param(
+        state,
+        parameters=["magnetic_model", "auxiliaries"],
+        widgets={"auxiliaries": {"type": pn.widgets.CheckBoxGroup}},
+        name="Auxiliaries",
         sizing_mode="stretch_width",
-        visible=False,
+        visible=not state.is_vobs,
     )
+
+    def _update_auxiliaries_visibility(event: param.parameterized.Event) -> None:
+        is_vobs = event.new == _VOBS_COLLECTION_TYPE
+        auxiliaries_param.visible = not is_vobs
+        if is_vobs and selection_tabs.active == 1:
+            selection_tabs.active = 0
+
+    state.param.watch(_update_auxiliaries_visibility, "collection_type")
+
+    selection_tabs = pn.layout.Tabs(
+        measurements_param,
+        auxiliaries_param,
+        sizing_mode="stretch_width",
+    )
+    return pn.Column(time_range, time_range_hint, selection_tabs, sizing_mode="stretch_width")
 
 
 def _build_code_editor(initial_value: str) -> tuple[pn.Column, pn.widgets.CodeEditor]:
@@ -701,69 +639,31 @@ def _build_preview_section(
     return section, html_pane, plot_pane
 
 
-def _setup_tab_watchers(
+def _setup_watchers(
     collection_tabs: pn.Tabs,
-    mag_state: MagState,
-    vobs_state: VobsState,
-    mag_params: pn.Column,
-    vobs_params: pn.Column,
+    state: QueryState,
     code_editor: pn.widgets.CodeEditor,
     html_pane: pn.pane.HTML,
     plot_pane: pn.Column,
-    plot_measurements_selector: pn.Param,
-    vobs_plot_measurements_selector: pn.Param,
 ) -> None:
-    def _no_plot_message() -> pn.pane.Markdown:
-        return pn.pane.Markdown("No plot available for selected measurements.")
+    def _on_vobs_tab_activated(active_index: int) -> None:
+        """When the VOBS/GVO tab is selected, switch state to the VOBS collection type."""
+        if active_index == VOBS_TAB and not state.is_vobs:
+            state.collection_type = _VOBS_COLLECTION_TYPE
 
-    def _sync_all(active_index: int) -> None:
-        is_vobs = active_index == VOBS_TAB
-        mag_params.visible = not is_vobs
-        vobs_params.visible = is_vobs
-        plot_measurements_selector.visible = not is_vobs
-        vobs_plot_measurements_selector.visible = is_vobs
-        state = vobs_state if is_vobs else mag_state
-        code_editor.value = state.code_snippet
-        html_pane.object = state.preview_dataset_html
-        plot_pane.clear()
-        if state.preview_plot is not None:
-            plot_pane.append(state.preview_plot)
-        else:
-            plot_pane.append(_no_plot_message())
-
-    collection_tabs.param.watch(lambda event: _sync_all(event.new), "active")
-    _sync_all(collection_tabs.active)
+    collection_tabs.param.watch(lambda event: _on_vobs_tab_activated(event.new), "active")
+    _on_vobs_tab_activated(collection_tabs.active)
 
     def _update_plot(event: param.parameterized.Event) -> None:
+        plot_pane.clear()
         if event.new is not None:
-            plot_pane.clear()
             plot_pane.append(event.new)
         else:
-            plot_pane.clear()
-            plot_pane.append(_no_plot_message())
+            plot_pane.append(pn.pane.Markdown("No plot available for selected measurements."))
 
-    def _on_mag_code_update(event: param.parameterized.Event) -> None:
-        if collection_tabs.active != VOBS_TAB:
-            code_editor.value = event.new
-
-    def _on_vobs_code_update(event: param.parameterized.Event) -> None:
-        if collection_tabs.active == VOBS_TAB:
-            code_editor.value = event.new
-
-    def _on_mag_preview_update(event: param.parameterized.Event) -> None:
-        if collection_tabs.active != VOBS_TAB:
-            html_pane.object = event.new
-
-    def _on_vobs_preview_update(event: param.parameterized.Event) -> None:
-        if collection_tabs.active == VOBS_TAB:
-            html_pane.object = event.new
-
-    mag_state.param.watch(_update_plot, "preview_plot")
-    vobs_state.param.watch(_update_plot, "preview_plot")
-    mag_state.param.watch(_on_mag_code_update, "code_snippet")
-    vobs_state.param.watch(_on_vobs_code_update, "code_snippet")
-    mag_state.param.watch(_on_mag_preview_update, "preview_dataset_html")
-    vobs_state.param.watch(_on_vobs_preview_update, "preview_dataset_html")
+    state.param.watch(_update_plot, "preview_plot")
+    state.param.watch(lambda e: setattr(code_editor, "value", e.new), "code_snippet")
+    state.param.watch(lambda e: setattr(html_pane, "object", e.new), "preview_dataset_html")
 
 
 def _build_header_banner() -> pn.pane.HTML:
@@ -793,10 +693,9 @@ def _build_header_banner() -> pn.pane.HTML:
     )
 
 
-def _build_dashboard(mag_state: MagState, vobs_state: VobsState) -> pn.template.FastListTemplate:
-    collection_tabs = _build_collection_tabs(mag_state, vobs_state)
-    mag_params = _build_mag_parameters(mag_state)
-    vobs_params = _build_vobs_parameters(vobs_state)
+def _build_dashboard(state: QueryState) -> pn.template.FastListTemplate:
+    collection_tabs = _build_collection_tabs(state)
+    parameters = _build_parameters(state)
 
     collection_section = pn.Column(
         pn.pane.Markdown("**Select collection**", margin=(0, 0, 8, 0)),
@@ -806,52 +705,31 @@ def _build_dashboard(mag_state: MagState, vobs_state: VobsState) -> pn.template.
     )
     parameters_section = pn.Column(
         pn.pane.Markdown("**Select parameters**", margin=(0, 0, 8, 0)),
-        mag_params,
-        vobs_params,
+        parameters,
         sizing_mode="stretch_width",
         styles=_SECTION_STYLES["parameters"],
     )
 
     plot_measurements_selector = pn.Param(
-        mag_state,
+        state,
         parameters=["plot_measurements"],
         widgets={"plot_measurements": {"type": pn.widgets.MultiSelect, "size": 5}},
         show_name=False,
         sizing_mode="stretch_width",
-    )
-    vobs_plot_measurements_selector = pn.Param(
-        vobs_state,
-        parameters=["plot_measurements"],
-        widgets={"plot_measurements": {"type": pn.widgets.MultiSelect, "size": 5}},
-        show_name=False,
-        sizing_mode="stretch_width",
-        visible=False,
     )
     plot_selector_container = pn.Column(
         pn.pane.Markdown("**Measurement to plot:**", margin=(0, 0, 4, 0), styles={"font-size": "12px"}),
         plot_measurements_selector,
-        vobs_plot_measurements_selector,
         sizing_mode="stretch_width",
     )
 
-    code_section, code_editor = _build_code_editor(mag_state.code_snippet)
+    code_section, code_editor = _build_code_editor(state.code_snippet)
     preview_section, html_pane, plot_pane = _build_preview_section(
-        mag_state.preview_dataset_html,
+        state.preview_dataset_html,
         plot_selector_container,
     )
 
-    _setup_tab_watchers(
-        collection_tabs,
-        mag_state,
-        vobs_state,
-        mag_params,
-        vobs_params,
-        code_editor,
-        html_pane,
-        plot_pane,
-        plot_measurements_selector,
-        vobs_plot_measurements_selector,
-    )
+    _setup_watchers(collection_tabs, state, code_editor, html_pane, plot_pane)
 
     return pn.template.FastListTemplate(
         title="VirES Query Builder",
@@ -868,7 +746,6 @@ def _build_dashboard(mag_state: MagState, vobs_state: VobsState) -> pn.template.
 # Entry point
 # ---------------------------------------------------------------------------
 
-mag_state = MagState()
-vobs_state = VobsState()
-dashboard = _build_dashboard(mag_state, vobs_state)
+state = QueryState()
+dashboard = _build_dashboard(state)
 dashboard.servable()
