@@ -218,6 +218,82 @@ _HANDBOOK_URLS: Dict[str, str] = {
     if col_type in _COLLECTION_REFERENCES and _COLLECTION_REFERENCES[col_type]
 }
 
+_NB_BASE = "https://notebooks.vires.services/notebooks/"
+# Notebook slug keyed by VirES collection type.  Used to build _NOTEBOOK_URLS below.
+_NOTEBOOK_BY_TYPE: Dict[str, str] = {
+    # Magnetometer
+    "MAG":          "03a1_demo-magx_lr_1b",
+    "MAG_HR":       "03a2_demo-magx_hr_1b",
+    "MAG_CHAMP":    "03y1_multi-mission-intro",
+    "MAG_CS":       "03y1_multi-mission-intro",
+    "MAG_GRACE":    "03y1_multi-mission-intro",
+    "MAG_GFO":      "03y1_multi-mission-intro",
+    "MAG_GFO_ML":   "03y1_multi-mission-intro",
+    "MAG_GOCE":     "03y1_multi-mission-intro",
+    "MAG_GOCE_ML":  "03y1_multi-mission-intro",
+    # Electric field / ion drift (Langmuir probe)
+    "EFI":          "03b__demo-efix_lp_1b",
+    "EFI:B06":      "03b__demo-efix_lp_1b",
+    "EFI_IDM":      "03k3_demo-efixidm",
+    "EFI_TIE":      "03k1_demo-efixtie",
+    "EFI_TCT02":    "03k2_demo-efixtct",
+    "EFI_TCT16":    "03k2_demo-efixtct",
+    # Ionosphere
+    "IBI":          "03g__demo-ibixtms_2f",
+    "TEC":          "03d__demo-tecxtms_2f",
+    "FAC":          "03e1_demo-facxtms_2f",
+    "EEF":          "03f__demo-eefxtms_2f",
+    "IPD":          "03c__demo-ipdxirr_2f",
+    # Auroral electrojets
+    "AEJ_LPL":                          "03h1_demo-aebs-aejxlpl",
+    "AEJ_LPL:Quality":                  "03h1_demo-aebs-aejxlpl",
+    "AEJ_LPS":                          "03h2_demo-aebs-aejxlps",
+    "AEJ_LPS:Quality":                  "03h2_demo-aebs-aejxlps",
+    "AEJ_PBL":                          "03h2_demo-aebs-aejxlps",
+    "AEJ_PBS":                          "03h2_demo-aebs-aejxlps",
+    "AEJ_PBS:GroundMagneticDisturbance": "03h2_demo-aebs-aejxlps",
+    "AOB_FAC":      "03h3_demo-aebs-aobxfac",
+    # VOBS / GVO
+    **{t: "03i1_demo-vobs" for t in _VOBS_COLLECTION_TYPES},
+    **{t: "03i1_demo-vobs" for t in _VOBS_SV_COLLECTION_TYPES},
+    # Ground observatories
+    "AUX_OBSH":     "04c2_geomag-ground-data-vires",
+    "AUX_OBSM":     "04c2_geomag-ground-data-vires",
+    "AUX_OBSS":     "04c2_geomag-ground-data-vires",
+    # Mid-latitude irregularities / plasma physics
+    "MIT_LP":       "03j1_demo-prism-mitx",
+    "MIT_LP:ID":    "03j1_demo-prism-mitx",
+    "MIT_TEC":      "03j1_demo-prism-mitx",
+    "MIT_TEC:ID":   "03j1_demo-prism-mitx",
+    "PPI_FAC":      "03j2_demo-prism-ppixfac",
+    "PPI_FAC:ID":   "03j2_demo-prism-ppixfac",
+    # Neutral density / wind
+    "DNS_POD":          "03l1_demo-dns",
+    "DNS_ACC":          "03l1_demo-dns",
+    "DNS_ACC_CHAMP":    "03l1_demo-dns",
+    "DNS_ACC_GRACE":    "03l1_demo-dns",
+    "DNS_ACC_GFO":      "03l1_demo-dns",
+    "WND_ACC_CHAMP":    "03l2_demo-wnd",
+    "WND_ACC_GRACE":    "03l2_demo-wnd",
+    "WND_ACC_GFO":      "03l2_demo-wnd",
+    # Conjunctions
+    "MM_CON_EPH_2_:crossover":        "03l3_demo-conjunctions-toleos",
+    "MM_CON_EPH_2_:plane_alignment":  "03l3_demo-conjunctions-toleos",
+}
+
+# Notebook URLs keyed by collection ID, resolved via COLLECTIONS_TO_TYPES.
+_NOTEBOOK_URLS: Dict[str, str] = {
+    col_id: _NB_BASE + slug
+    for col_id, col_type in COLLECTIONS_TO_TYPES.items()
+    if (slug := _NOTEBOOK_BY_TYPE.get(col_type))
+}
+# Override FAST MAG collections (share type keys with OPER but have own notebook).
+_NOTEBOOK_URLS.update({
+    col_id: _NB_BASE + "06a1_fast-intro"
+    for mission in MAG_COLLECTIONS.values()
+    for col_id in (c for sc in mission.values() for c in sc.values() if "FAST" in c)
+})
+
 # ---------------------------------------------------------------------------
 # Utility functions
 # ---------------------------------------------------------------------------
@@ -583,17 +659,35 @@ class QueryState(param.Parameterized):
             self.param["collection"].objects = collections
             self.collection = collections[0]
 
-    @param.depends("collection", watch=True, on_init=True)
+    @param.depends("collection", "measurements", "time_range", watch=True, on_init=True)
     def _update_about_data(self) -> None:
         col = self.collection
-        url = _HANDBOOK_URLS.get(col)
+        doc_url = _HANDBOOK_URLS.get(col)
+        nb_url = _NOTEBOOK_URLS.get(col)
         doc_link = (
-            f' <a href="{url}" target="_blank" style="color:#2563eb;">Documentation ↗</a>'
-            if url else ""
+            f' <a href="{doc_url}" target="_blank" style="color:#2563eb;">Documentation ↗</a>'
+            if doc_url else ""
         )
+        if self.is_ground:
+            doc_link += ' <a href="https://auxobs-api.bgs.ac.uk/docs" target="_blank" style="color:#2563eb;">AuxObs API ↗</a>'
+        nb_link = (
+            f' <a href="{nb_url}" target="_blank" style="color:#7c3aed;">Notebook ↗</a>'
+            if nb_url else ""
+        )
+        hapi_link = ""
+        if self.time_range and not self.is_vobs and not self.is_ground:
+            start = self.time_range[0].strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            stop = self.time_range[1].strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            params_part = f"&parameters={','.join(self.measurements)}" if self.measurements else ""
+            hapi_url = (
+                f"https://hapi-server.org/servers/#server=VirES-for-Swarm"
+                f"&dataset={col}{params_part}"
+                f"&start={start}&stop={stop}&return=script&format=python"
+            )
+            hapi_link = f' <a href="{hapi_url}" target="_blank" style="color:#059669;">HAPI ↗</a>'
         self.about_data_html = (
             f"<p style='margin:0;font-size:12px;color:#374151'>"
-            f"{col}{doc_link}"
+            f"{col}{doc_link}{nb_link}{hapi_link}"
             f"</p>"
         )
 
