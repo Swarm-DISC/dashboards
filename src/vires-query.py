@@ -10,6 +10,15 @@ import hvplot.xarray  # noqa: F401
 import panel as pn
 import param
 from viresclient import SwarmRequest
+try:
+    from viresclient._client import NRECORDS_LIMIT as _NRECORDS_LIMIT, MAX_CHUNK_DURATION as _MAX_CHUNK_DURATION
+except ImportError:
+    _NRECORDS_LIMIT = 4320000  # 50 days at 1Hz
+    _MAX_CHUNK_DURATION = dt.timedelta(days=25 * 365)
+try:
+    from viresclient._client_swarm import COLLECTION_REFERENCES as _COLLECTION_REFERENCES
+except ImportError:
+    _COLLECTION_REFERENCES = {}
 
 pn.extension("codeeditor")
 if pn.state.curdoc is not None:
@@ -19,7 +28,8 @@ if pn.state.curdoc is not None:
 # Constants
 # ---------------------------------------------------------------------------
 
-VOBS_TAB = 2  # index of the VOBS/GVO tab in the collection-type tab bar
+_VOBS_MAGNETIC_TAB = 1   # index of the GVO/VOBS tab within the Magnetic card sub-tabs
+_GROUND_MAGNETIC_TAB = 2  # index of the Ground tab within the Magnetic card sub-tabs
 
 _SECTION_STYLES = {
     "collection": {
@@ -40,6 +50,12 @@ _SECTION_STYLES = {
         "border-radius": "8px",
         "padding": "12px",
     },
+    "time": {
+        "border": "1px solid #ddd6fe",
+        "background": "#f5f3ff",
+        "border-radius": "8px",
+        "padding": "12px",
+    },
     "preview": {
         "border": "1px solid #fbcfe8",
         "background": "#fdf2f8",
@@ -47,7 +63,6 @@ _SECTION_STYLES = {
         "padding": "12px",
     },
 }
-_HINT_STYLES = {"color": "#374151", "font-size": "12px"}
 _EXCLUDED_AUXILIARIES = {"Timestamp", "Latitude", "Longitude", "Radius", "Spacecraft"}
 
 # ---------------------------------------------------------------------------
@@ -60,35 +75,15 @@ from viresclient import SwarmRequest
 request = SwarmRequest()
 request.set_collection('{collection}', verbose=False)
 request.set_products(
-    measurements={measurements},
-    models=['{magnetic_model}'],
-    auxiliaries={auxiliaries},
-    # sampling_step="PT1S"
+    measurements={measurements},{models_line}{auxiliaries_line}
 )
 data = request.get_between(
     start_time={time_range[0]!r},
     end_time={time_range[1]!r},
-    asynchronous=False,
+    asynchronous=False,  # NB: For longer requests, change to True
     show_progress=False,
 )
-ds = data.as_xarray()"""
-
-VOBS_REQUEST_TEMPLATE = """import datetime as dt
-from viresclient import SwarmRequest
-
-request = SwarmRequest()
-request.set_collection('{collection}', verbose=False)
-request.set_products(
-    measurements={measurements},
-    # sampling_step="PT1S"
-)
-data = request.get_between(
-    start_time={time_range[0]!r},
-    end_time={time_range[1]!r},
-    asynchronous=False,
-    show_progress=False,
-)
-ds = data.as_xarray(reshape=True)"""
+ds = data.as_xarray({as_xarray_args})"""
 
 # ---------------------------------------------------------------------------
 # Collection data
@@ -140,6 +135,17 @@ VOBS_COLLECTIONS = {
     "Composite (1-monthly)": "CO_OPER_VOBS_1M_2_",
 }
 
+VOBS_SV_COLLECTIONS = {
+    label: f"{col_id}:SecularVariation"
+    for label, col_id in VOBS_COLLECTIONS.items()
+}
+
+AUX_OBS_COLLECTIONS = {
+    "AUX_OBSH (hourly)": "SW_OPER_AUX_OBSH2_",
+    "AUX_OBSM (minute)": "SW_OPER_AUX_OBSM2_",
+    "AUX_OBSS (second)": "SW_OPER_AUX_OBSS2_",
+}
+
 
 def _load_metadata() -> tuple[Dict[str, List[str]], Dict[str, List[str]], List[str], List[str], Dict[str, str], Dict[str, str]]:
     vires = SwarmRequest()
@@ -161,11 +167,56 @@ def _load_metadata() -> tuple[Dict[str, List[str]], Dict[str, List[str]], List[s
 
 COLLECTION_MAP, MEASUREMENTS_BY_COLLECTION, AUXILIARIES, MAG_MODELS, COLLECTIONS_TO_TYPES, COLLECTION_SAMPLING_STEPS = _load_metadata()
 
-# Derive the VirES collection-type key for VOBS collections at startup.
-# COLLECTIONS_TO_TYPES maps collection IDs → type keys; fall back to "VOBS".
+# Derive VirES collection-type keys for all magnetic space collections at startup.
+# COLLECTIONS_TO_TYPES maps collection IDs → type keys.
+_MAG_COLLECTION_TYPES: frozenset = frozenset(filter(None, (
+    COLLECTIONS_TO_TYPES.get(col_id)
+    for mission in MAG_COLLECTIONS.values()
+    for spacecraft in mission.values()
+    for col_id in spacecraft.values()
+)))
+_MAG_HR_COLLECTION_TYPES: frozenset = frozenset(filter(None, (
+    COLLECTIONS_TO_TYPES.get(col_id)
+    for mission in MAG_COLLECTIONS.values()
+    for spacecraft in mission.values()
+    for variant, col_id in spacecraft.items()
+    if "HR" in variant
+)))
+
+# Fallback singleton for VOBS (used as default when type lookup fails).
 _VOBS_COLLECTION_TYPE: str = COLLECTIONS_TO_TYPES.get(
     next(iter(VOBS_COLLECTIONS.values())), "VOBS"
 )
+_VOBS_COLLECTION_TYPES: frozenset = frozenset(filter(None, (
+    COLLECTIONS_TO_TYPES.get(col_id) for col_id in VOBS_COLLECTIONS.values()
+)))
+_VOBS_SV_COLLECTION_TYPES: frozenset = frozenset(filter(None, (
+    COLLECTIONS_TO_TYPES.get(col_id) for col_id in VOBS_SV_COLLECTIONS.values()
+)))
+_ALL_VOBS_COLLECTION_TYPES: frozenset = _VOBS_COLLECTION_TYPES | _VOBS_SV_COLLECTION_TYPES
+_GROUND_COLLECTION_TYPE: str = COLLECTIONS_TO_TYPES.get(
+    next(iter(AUX_OBS_COLLECTIONS.values())), "AUX_OBS_2_"
+)
+_AUX_OBSH_COLLECTION_TYPE: str = COLLECTIONS_TO_TYPES.get("SW_OPER_AUX_OBSH2_", "")
+_AUX_OBSM_COLLECTION_TYPE: str = COLLECTIONS_TO_TYPES.get("SW_OPER_AUX_OBSM2_", "")
+_AUX_OBSS_COLLECTION_TYPE: str = COLLECTIONS_TO_TYPES.get("SW_OPER_AUX_OBSS2_", "")
+
+# All collection IDs accessible via the Magnetic card (Space + GVO/VOBS + Ground sub-tabs).
+_MAGNETIC_COLLECTION_IDS: frozenset = frozenset(
+    col_id
+    for mission_data in MAG_COLLECTIONS.values()
+    for spacecraft_data in mission_data.values()
+    for col_id in spacecraft_data.values()
+) | frozenset(VOBS_COLLECTIONS.values()) | frozenset(VOBS_SV_COLLECTIONS.values()) | frozenset(AUX_OBS_COLLECTIONS.values())
+
+
+# Handbook/reference URLs keyed by collection ID, derived from viresclient's
+# COLLECTION_REFERENCES (which is keyed by collection type) via COLLECTIONS_TO_TYPES.
+_HANDBOOK_URLS: Dict[str, str] = {
+    col_id: _COLLECTION_REFERENCES[col_type][0].strip()
+    for col_id, col_type in COLLECTIONS_TO_TYPES.items()
+    if col_type in _COLLECTION_REFERENCES and _COLLECTION_REFERENCES[col_type]
+}
 
 # ---------------------------------------------------------------------------
 # Utility functions
@@ -248,38 +299,121 @@ def _get_collection_time_extent(collection: str) -> Optional[Tuple[str, str]]:
     vires = SwarmRequest()
     info = vires.get_collection_info(collection)
     value = _extract_time_extent(info)
+
+    # Sub-collections (e.g. :SecularVariation) may not carry time extent metadata;
+    # fall back to the base collection (strip the colon-suffix) in that case.
+    if value is None and ":" in collection:
+        base = collection.split(":")[0]
+        value = _get_collection_time_extent(base)
+
     _TIME_EXTENT_CACHE[collection] = value
     return value
 
 
-def _format_time_extent_label(time_extent: Optional[Tuple[str, str]]) -> str:
-    if not time_extent:
-        return "Available time: unknown"
-    start, end = time_extent
-    return f"Available time: {start} to {end}"
+def _format_duration(td: Optional[dt.timedelta]) -> str:
+    if td is None:
+        return ""
+    total_seconds = td.total_seconds()
+    for seconds_per_unit, unit in (
+        (365.25 * 86400, "year"),
+        (30.44 * 86400, "month"),
+        (86400, "day"),
+        (3600, "hour"),
+        (60, "minute"),
+        (1, "second"),
+    ):
+        n = total_seconds / seconds_per_unit
+        if n >= 1:
+            rounded = round(n)
+            exact = abs(n - rounded) < 0.01
+            label = f"{rounded}\u00a0{unit}{'s' if rounded != 1 else ''}"
+            return label if exact else f"~{label}"
+    return str(td)
 
 
-def _calculate_auto_time_range(collection: str) -> tuple[dt.datetime, dt.datetime]:
-    """Calculate automatic time range: starts at collection availability start, spans 10 samples."""
+def _format_time_extent_label(
+    time_extent: Optional[Tuple[str, str]],
+    max_duration: Optional[dt.timedelta] = None,
+) -> str:
+    availability = "unknown"
+    if time_extent:
+        start_day = time_extent[0][:10]
+        end_day = time_extent[1][:10]
+        availability = f"{start_day} \u2013 {end_day}"
+    hint_style = "color:#6b7280;font-size:11px;margin:0"
+    lines = [f"<p style='{hint_style}'>Available: {availability}</p>"]
+    if max_duration is not None:
+        lines.append(f"<p style='{hint_style}'>Max allowed: {_format_duration(max_duration)}</p>")
+    hints = "".join(lines)
+    return (
+        f"<div style='margin-bottom:4px'>"
+        f"<span style='font-weight:600'>Select times</span>"
+        f"<br>{hints}"
+        f"</div>"
+    )
+
+
+def _calculate_auto_time_range(collection: str) -> tuple[dt.datetime, dt.datetime, dt.timedelta]:
+    """Calculate automatic time range and the viresclient max chunk duration.
+
+    Anchors to the END of available data and subtracts the span.
+    VOBS/GVO: 5 years. MAG HR: 5 min. MAG LR: 45 min.
+    AUX_OBSH: 1 year. AUX_OBSM: 1 day. AUX_OBSS: 45 min."""
+    collection_type = COLLECTIONS_TO_TYPES.get(collection, "MAG")
+    is_vobs = collection_type in _ALL_VOBS_COLLECTION_TYPES
+
+    is_mag = collection_type in _MAG_COLLECTION_TYPES
+    is_mag_hr = collection_type in _MAG_HR_COLLECTION_TYPES
+    is_obsh = collection_type == _AUX_OBSH_COLLECTION_TYPE
+    is_obsm = collection_type == _AUX_OBSM_COLLECTION_TYPE
+    is_obss = collection_type == _AUX_OBSS_COLLECTION_TYPE
     time_extent = _get_collection_time_extent(collection)
     if not time_extent:
-        start = dt.datetime(2024, 3, 1)
-        return start, start + dt.timedelta(minutes=1)
+        end = dt.datetime(2024, 3, 1)
+        if is_vobs:
+            span = dt.timedelta(days=5 * 365)
+        elif is_mag_hr:
+            span = dt.timedelta(minutes=5)
+        elif is_mag:
+            span = dt.timedelta(minutes=45)
+        elif is_obsh:
+            span = dt.timedelta(days=28)
+        elif is_obsm:
+            span = dt.timedelta(days=1)
+        elif is_obss:
+            span = dt.timedelta(minutes=45)
+        else:
+            span = dt.timedelta(minutes=1)
+        return end - span, end, _MAX_CHUNK_DURATION
 
-    start_str, _ = time_extent
+    _, end_str = time_extent
     try:
-        start = dt.datetime.fromisoformat(start_str.replace('Z', '+00:00')).replace(tzinfo=None)
+        end = dt.datetime.fromisoformat(end_str.replace('Z', '+00:00')).replace(tzinfo=None)
     except Exception:
-        start = dt.datetime(2024, 3, 1)
+        end = dt.datetime(2024, 3, 1)
 
-    collection_type = COLLECTIONS_TO_TYPES.get(collection, "MAG")
     sampling_step_str = COLLECTION_SAMPLING_STEPS.get(collection_type, "PT1S")
     try:
         sampling_step = _parse_iso8601_duration(sampling_step_str)
     except Exception:
         sampling_step = dt.timedelta(seconds=1)
 
-    return start, start + sampling_step * 10
+    max_duration = min(_NRECORDS_LIMIT * sampling_step, _MAX_CHUNK_DURATION)
+    if is_vobs:
+        span = dt.timedelta(days=5 * 365)
+    elif is_mag_hr:
+        span = dt.timedelta(minutes=5)
+    elif is_mag:
+        span = dt.timedelta(minutes=45)
+    elif is_obsh:
+        span = dt.timedelta(days=365)
+    elif is_obsm:
+        span = dt.timedelta(days=1)
+    elif is_obss:
+        span = dt.timedelta(minutes=45)
+    else:
+        span = sampling_step * 10
+    return end - span, end, max_duration
 
 
 def _render_request_snippet(
@@ -288,13 +422,19 @@ def _render_request_snippet(
     auxiliaries: List[str],
     time_range: tuple[dt.datetime, dt.datetime],
     magnetic_model: str,
+    is_vobs: bool = False,
+    is_ground: bool = False,
 ) -> str:
+    models_line = f"\n    models=['{magnetic_model}']," if magnetic_model else ""
+    auxiliaries_line = f"\n    auxiliaries={auxiliaries},"
+    as_xarray_args = "reshape=True" if (is_vobs or is_ground) else ""
     return REQUEST_TEMPLATE.format(
         collection=collection,
         measurements=measurements,
-        auxiliaries=auxiliaries,
+        models_line=models_line,
+        auxiliaries_line=auxiliaries_line,
         time_range=time_range,
-        magnetic_model=magnetic_model,
+        as_xarray_args=as_xarray_args,
     ).replace("datetime.datetime", "dt.datetime")
 
 
@@ -368,7 +508,10 @@ class QueryState(param.Parameterized):
     auxiliaries = param.ListSelector(default=[], objects=AUXILIARIES)
     time_range = param.DateRange(default=(dt.datetime(2024, 3, 1), dt.datetime(2024, 3, 1, 0, 1)))
     time_extent_label = param.String("")
+    max_duration = param.Parameter(default=None)
+    about_data_html = param.String("")
     code_snippet = param.String("")
+    is_loading = param.Boolean(default=False)
     preview_dataset_html = param.String("")
     preview_plot = param.Parameter(default=None)
     plot_measurements = param.ListSelector(default=[], objects=[])
@@ -384,16 +527,36 @@ class QueryState(param.Parameterized):
         objects=list(VOBS_COLLECTIONS.keys()),
         label="Collection",
     )
+    vobs_secular_variation = param.Boolean(default=False, label="Secular Variation")
+
+    # --- Ground collection selection ---
+    ground_collection_label = param.Selector(
+        default="AUX_OBSH (hourly)",
+        objects=list(AUX_OBS_COLLECTIONS.keys()),
+        label="Collection",
+    )
 
     _last_dataset = None
     _default_measurements_by_type = {
-        "MAG": ["B_NEC"],
-        _VOBS_COLLECTION_TYPE: ["SiteCode", "B_OB", "B_CF"],
+        **{mag_type: ["B_NEC"] for mag_type in _MAG_COLLECTION_TYPES},
+        **{vobs_type: ["SiteCode", "B_OB", "B_CF"] for vobs_type in _VOBS_COLLECTION_TYPES},
+        **{sv_type: ["SiteCode", "B_SV"] for sv_type in _VOBS_SV_COLLECTION_TYPES},
+        _GROUND_COLLECTION_TYPE: ["B_NEC", "IAGA_code"],
     }
+    _OBSH_COLLECTION_ID = AUX_OBS_COLLECTIONS["AUX_OBSH (hourly)"]
+
+    def _ground_default_measurements(self) -> list:
+        if self.collection == self._OBSH_COLLECTION_ID:
+            return ["B_NEC", "IAGA_code", "ObsIndex"]
+        return ["B_NEC", "IAGA_code"]
 
     @property
     def is_vobs(self) -> bool:
-        return self.collection_type == _VOBS_COLLECTION_TYPE
+        return self.collection_type in _ALL_VOBS_COLLECTION_TYPES
+
+    @property
+    def is_ground(self) -> bool:
+        return self.collection_type == _GROUND_COLLECTION_TYPE
 
     # --- Generic tab handlers ---
 
@@ -402,17 +565,37 @@ class QueryState(param.Parameterized):
         # Update objects before values so ListSelector validation doesn't drop them.
         self.param["measurements"].objects = MEASUREMENTS_BY_COLLECTION[self.collection_type]
         self.measurements = list(self._default_measurements_by_type.get(self.collection_type, []))
-        # VOBS collections span multiple VirES type keys, so use the full VOBS_COLLECTIONS
-        # list as objects rather than just the single-type slice from COLLECTION_MAP.
         if self.is_vobs:
-            collections = list(VOBS_COLLECTIONS.values())
-            preferred = VOBS_COLLECTIONS.get(self.vobs_collection_label)
+            is_sv = self.collection_type in _VOBS_SV_COLLECTION_TYPES
+            src = VOBS_SV_COLLECTIONS if is_sv else VOBS_COLLECTIONS
+            collections = COLLECTION_MAP.get(self.collection_type) or list(src.values())
+            self.param["collection"].objects = collections
+            preferred = src.get(self.vobs_collection_label)
+            self.collection = preferred if preferred in collections else collections[0]
+        elif self.is_ground:
+            collections = list(AUX_OBS_COLLECTIONS.values())
+            preferred = AUX_OBS_COLLECTIONS.get(self.ground_collection_label)
             self.param["collection"].objects = collections
             self.collection = preferred if preferred in collections else collections[0]
+            self.measurements = self._ground_default_measurements()
         else:
             collections = COLLECTION_MAP[self.collection_type]
             self.param["collection"].objects = collections
             self.collection = collections[0]
+
+    @param.depends("collection", watch=True, on_init=True)
+    def _update_about_data(self) -> None:
+        col = self.collection
+        url = _HANDBOOK_URLS.get(col)
+        doc_link = (
+            f' <a href="{url}" target="_blank" style="color:#2563eb;">Documentation ↗</a>'
+            if url else ""
+        )
+        self.about_data_html = (
+            f"<p style='margin:0;font-size:12px;color:#374151'>"
+            f"{col}{doc_link}"
+            f"</p>"
+        )
 
     @param.depends(
         "collection",
@@ -424,39 +607,35 @@ class QueryState(param.Parameterized):
         on_init=True,
     )
     def _update_code_snippet(self) -> None:
-        if self.is_vobs:
-            self.code_snippet = VOBS_REQUEST_TEMPLATE.format(
-                collection=self.collection,
-                measurements=list(self.measurements),
-                time_range=self.time_range,
-            )
-        else:
-            self.code_snippet = _render_request_snippet(
-                collection=self.collection,
-                measurements=self.measurements,
-                auxiliaries=self.auxiliaries,
-                time_range=self.time_range,
-                magnetic_model=self.magnetic_model,
-            )
+        self.code_snippet = _render_request_snippet(
+            collection=self.collection,
+            measurements=list(self.measurements),
+            auxiliaries=list(self.auxiliaries),
+            time_range=self.time_range,
+            magnetic_model=self.magnetic_model,
+            is_vobs=self.is_vobs,
+            is_ground=self.is_ground,
+        )
 
-    @param.depends("collection", watch=True, on_init=True)
+    @param.depends("collection", "max_duration", watch=True, on_init=True)
     def _update_time_extent_label(self) -> None:
         time_extent = _get_collection_time_extent(self.collection)
-        self.time_extent_label = _format_time_extent_label(time_extent)
+        self.time_extent_label = _format_time_extent_label(time_extent, self.max_duration)
 
     @param.depends("code_snippet", watch=True, on_init=True)
     async def _update_preview_dataset(self) -> None:
         self.preview_dataset_html = "Loading preview..."
         self.preview_plot = None
+        self.is_loading = True
         try:
             ds = await asyncio.to_thread(
                 _build_preview_dataset,
                 self.collection,
                 list(self.measurements),
-                [] if self.is_vobs else list(self.auxiliaries),
+                [] if (self.is_vobs or self.is_ground) else list(self.auxiliaries),
                 self.time_range,
-                "" if self.is_vobs else self.magnetic_model,
-                self.is_vobs,
+                "" if (self.is_vobs or self.is_ground) else self.magnetic_model,
+                self.is_vobs or self.is_ground,
             )
         except Exception as exc:
             self.preview_dataset_html = f"Preview failed: {exc}"
@@ -472,6 +651,8 @@ class QueryState(param.Parameterized):
                 ds,
                 self.plot_measurements or list(self.measurements),
             )
+        finally:
+            self.is_loading = False
 
     @param.depends("plot_measurements", watch=True)
     def _update_preview_plot_on_plot_measurement_change(self) -> None:
@@ -483,8 +664,9 @@ class QueryState(param.Parameterized):
 
     @param.depends("collection", watch=True, on_init=True)
     def _update_auto_time_range(self) -> None:
-        start, end = _calculate_auto_time_range(self.collection)
+        start, end, max_duration = _calculate_auto_time_range(self.collection)
         self.time_range = (start, end)
+        self.max_duration = max_duration
 
     # --- Magnetic (space) tab handlers ---
 
@@ -508,59 +690,97 @@ class QueryState(param.Parameterized):
 
     # --- VOBS/GVO tab handlers ---
 
-    @param.depends("vobs_collection_label", watch=True)
+    @param.depends("vobs_collection_label", "vobs_secular_variation", watch=True)
     def _update_vobs_collection(self) -> None:
-        if self.is_vobs:
-            self.collection = VOBS_COLLECTIONS[self.vobs_collection_label]
+        if not self.is_vobs:
+            return
+        src = VOBS_SV_COLLECTIONS if self.vobs_secular_variation else VOBS_COLLECTIONS
+        new_collection = src[self.vobs_collection_label]
+        new_type = COLLECTIONS_TO_TYPES.get(new_collection, self.collection_type)
+        if new_type != self.collection_type:
+            # Changing collection_type triggers _update_collections_and_measurements
+            # which sets measurements, collection objects, and collection value.
+            self.collection_type = new_type
+        else:
+            # Same type (e.g. label changed within the same mission group):
+            # update collection objects + selection and reset measurements to defaults.
+            collections = COLLECTION_MAP.get(self.collection_type) or list(src.values())
+            self.param["collection"].objects = collections
+            self.collection = new_collection
+            self.param["measurements"].objects = MEASUREMENTS_BY_COLLECTION[self.collection_type]
+            self.measurements = list(self._default_measurements_by_type.get(self.collection_type, []))
+
+    @param.depends("ground_collection_label", watch=True)
+    def _update_ground_collection(self) -> None:
+        if self.is_ground:
+            self.collection = AUX_OBS_COLLECTIONS[self.ground_collection_label]
+            self.measurements = self._ground_default_measurements()
 
 
 # ---------------------------------------------------------------------------
 # Dashboard builder sub-functions
 # ---------------------------------------------------------------------------
 
-def _build_collection_tabs(state: QueryState) -> pn.Tabs:
-    return pn.layout.Tabs(
-        pn.Param(
-            state,
-            parameters=["collection_type", "collection"],
-            widgets={"collection": {"type": pn.widgets.Select, "size": 6}},
-            name="Generic",
-            sizing_mode="stretch_width",
-        ),
-        pn.Param(
-            state,
-            parameters=["mission", "spacecraft", "variant"],
-            name="Magnetic (space)",
-            sizing_mode="stretch_width",
-        ),
-        pn.Param(
-            state,
-            parameters=["vobs_collection_label"],
-            name="VOBS/GVO",
-            sizing_mode="stretch_width",
-        ),
-        sizing_mode="stretch_width",
-    )
-
-
-def _build_parameters(state: QueryState) -> pn.Column:
-    time_range_hint = pn.pane.Markdown(
-        state.time_extent_label,
-        sizing_mode="stretch_width",
-        margin=(4, 0, 0, 0),
-        styles=_HINT_STYLES,
-    )
-    state.param.watch(
-        lambda event: setattr(time_range_hint, "object", event.new),
-        "time_extent_label",
-    )
-    time_range = pn.Param(
+def _build_collection_tabs(state: QueryState) -> tuple[pn.Tabs, pn.Tabs]:
+    all_collections_content = pn.Param(
         state,
-        parameters=["time_range"],
-        widgets={"time_range": {"type": pn.widgets.DatetimeRangePicker}},
+        parameters=["collection_type", "collection"],
+        widgets={"collection": {"type": pn.widgets.Select, "size": 6}},
         show_name=False,
         sizing_mode="stretch_width",
     )
+    space_content = pn.Param(
+        state,
+        parameters=["mission", "spacecraft", "variant"],
+        show_name=False,
+        sizing_mode="stretch_width",
+    )
+    vobs_content = pn.Param(
+        state,
+        parameters=["vobs_collection_label", "vobs_secular_variation"],
+        widgets={"vobs_secular_variation": {"type": pn.widgets.Checkbox}},
+        show_name=False,
+        sizing_mode="stretch_width",
+    )
+    ground_content = pn.Param(
+        state,
+        parameters=["ground_collection_label"],
+        show_name=False,
+        sizing_mode="stretch_width",
+    )
+    magnetic_tabs = pn.Tabs(
+        ("Space", space_content),
+        ("GVO / VOBS", vobs_content),
+        ("Ground", ground_content),
+        sizing_mode="stretch_width",
+    )
+    collection_tabs = pn.Tabs(
+        ("All collections", all_collections_content),
+        ("Magnetic", magnetic_tabs),
+        sizing_mode="stretch_width",
+    )
+    return collection_tabs, magnetic_tabs
+
+
+def _build_time_section(state: QueryState) -> pn.Column:
+    time_range_label = pn.pane.HTML(
+        state.time_extent_label,
+        sizing_mode="stretch_width",
+        margin=(0, 0, 0, 0),
+    )
+    state.param.watch(
+        lambda event: setattr(time_range_label, "object", event.new),
+        "time_extent_label",
+    )
+    time_range_widget = pn.widgets.DatetimeRangePicker.from_param(
+        state.param.time_range,
+        name="",
+        sizing_mode="stretch_width",
+    )
+    return pn.Column(time_range_label, time_range_widget, sizing_mode="stretch_width")
+
+
+def _build_parameters(state: QueryState) -> pn.Column:
     measurements_param = pn.Param(
         state,
         parameters=["measurements"],
@@ -568,38 +788,60 @@ def _build_parameters(state: QueryState) -> pn.Column:
         name="Measurements",
         sizing_mode="stretch_width",
     )
+    models_param = pn.Param(
+        state,
+        parameters=["magnetic_model"],
+        name="Models",
+        sizing_mode="stretch_width",
+    )
     auxiliaries_param = pn.Param(
         state,
-        parameters=["magnetic_model", "auxiliaries"],
+        parameters=["auxiliaries"],
         widgets={"auxiliaries": {"type": pn.widgets.CheckBoxGroup}},
         name="Auxiliaries",
         sizing_mode="stretch_width",
     )
+    is_not_mag = state.is_vobs or state.is_ground
+    models_param.disabled = is_not_mag
+    auxiliaries_param.disabled = is_not_mag
+
+    def _update_mag_params_enabled(event: param.parameterized.Event) -> None:
+        disabled = event.new in _ALL_VOBS_COLLECTION_TYPES or event.new == _GROUND_COLLECTION_TYPE
+        models_param.disabled = disabled
+        auxiliaries_param.disabled = disabled
+
+    state.param.watch(_update_mag_params_enabled, "collection_type")
 
     selection_tabs = pn.layout.Tabs(
         measurements_param,
+        models_param,
         auxiliaries_param,
         sizing_mode="stretch_width",
     )
-    return pn.Column(time_range, time_range_hint, selection_tabs, sizing_mode="stretch_width")
+    return pn.Column(selection_tabs, sizing_mode="stretch_width")
 
 
 
 
 def _setup_watchers(
-    collection_tabs: pn.Tabs,
+    magnetic_tabs: pn.Tabs,
     state: QueryState,
     code_editor: pn.widgets.CodeEditor,
     html_pane: pn.pane.HTML,
     plot_pane: pn.Column,
 ) -> None:
-    def _on_vobs_tab_activated(active_index: int) -> None:
-        """When the VOBS/GVO tab is selected, switch state to the VOBS collection type."""
-        if active_index == VOBS_TAB and not state.is_vobs:
-            state.collection_type = _VOBS_COLLECTION_TYPE
+    def _on_magnetic_tab_changed(active_index: int) -> None:
+        if active_index == 0:  # Space
+            state._update_collection_from_mag()
+        elif active_index == _VOBS_MAGNETIC_TAB and not state.is_vobs:
+            src = VOBS_SV_COLLECTIONS if state.vobs_secular_variation else VOBS_COLLECTIONS
+            col = src.get(state.vobs_collection_label, next(iter(src.values())))
+            state.collection_type = COLLECTIONS_TO_TYPES.get(col, _VOBS_COLLECTION_TYPE)
+        elif active_index == _GROUND_MAGNETIC_TAB and not state.is_ground:
+            state.collection_type = _GROUND_COLLECTION_TYPE
 
-    collection_tabs.param.watch(lambda event: _on_vobs_tab_activated(event.new), "active")
-    _on_vobs_tab_activated(collection_tabs.active)
+    magnetic_tabs.param.watch(lambda event: _on_magnetic_tab_changed(event.new), "active")
+    _on_magnetic_tab_changed(magnetic_tabs.active)
 
     def _update_plot(event: param.parameterized.Event) -> None:
         plot_pane.clear()
@@ -633,6 +875,7 @@ def _build_header_banner() -> pn.pane.HTML:
                 generated
                 <a href="https://viresclient.readthedocs.io" style="color: #2563eb;" target="_blank">viresclient</a>
                 code into your own Python environment. A small data preview loads automatically.
+                See <a href="https://viresclient.readthedocs.io/en/latest/capabilities.html" style="color: #2563eb;" target="_blank">VirES capabilities</a> for more possibilities.
             </p>
         </div>
         """,
@@ -641,14 +884,20 @@ def _build_header_banner() -> pn.pane.HTML:
 
 
 def _build_dashboard(state: QueryState) -> pn.template.FastListTemplate:
-    collection_tabs = _build_collection_tabs(state)
+    collection_layout, magnetic_tabs = _build_collection_tabs(state)
+    time_section_content = _build_time_section(state)
     parameters = _build_parameters(state)
 
     collection_section = pn.Column(
         pn.pane.Markdown("**Select collection**", margin=(0, 0, 8, 0)),
-        collection_tabs,
+        collection_layout,
         sizing_mode="stretch_width",
         styles=_SECTION_STYLES["collection"],
+    )
+    time_section = pn.Column(
+        time_section_content,
+        sizing_mode="stretch_width",
+        styles=_SECTION_STYLES["time"],
     )
     parameters_section = pn.Column(
         pn.pane.Markdown("**Select parameters**", margin=(0, 0, 8, 0)),
@@ -691,12 +940,37 @@ def _build_dashboard(state: QueryState) -> pn.template.FastListTemplate:
         sizing_mode="stretch_both",
     )
 
-    _setup_watchers(collection_tabs, state, code_editor, html_pane, plot_pane)
+    about_data_pane = pn.pane.HTML(
+        state.about_data_html,
+        sizing_mode="stretch_width",
+        margin=(0, 0, 4, 0),
+    )
+    state.param.watch(lambda e: setattr(about_data_pane, "object", e.new), "about_data_html")
+
+    progress_bar = pn.widgets.Progress(
+        value=-1,
+        active=False,
+        visible=False,
+        sizing_mode="stretch_width",
+        height=4,
+        margin=(0, 0, 0, 0),
+        bar_color="primary",
+    )
+
+    def _update_progress(event: param.parameterized.Event) -> None:
+        progress_bar.active = event.new
+        progress_bar.visible = event.new
+
+    state.param.watch(_update_progress, "is_loading")
+
+    main_card = pn.Column(about_data_pane, progress_bar, main_tabs, sizing_mode="stretch_both")
+
+    _setup_watchers(magnetic_tabs, state, code_editor, html_pane, plot_pane)
 
     return pn.template.FastListTemplate(
         title="VirES Query Builder",
-        sidebar=[collection_section, parameters_section],
-        main=[_build_header_banner(), main_tabs],
+        sidebar=[collection_section, time_section, parameters_section],
+        main=[_build_header_banner(), main_card],
         sidebar_width=380,
         header_background="#1d4ed8",
         accent="#2563eb",
