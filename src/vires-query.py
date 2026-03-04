@@ -642,10 +642,16 @@ class QueryState(param.Parameterized):
         else:
             self._last_dataset = ds
             self.preview_dataset_html = ds._repr_html_()
-            available_measurements = [m for m in self.measurements if m in ds.data_vars]
+            available_measurements = [
+                m for m in ds.data_vars if ds[m].dtype.kind in "biufc"
+            ]
             self.param["plot_measurements"].objects = available_measurements
             if available_measurements:
-                self.plot_measurements = [available_measurements[0]]
+                preferred = next(
+                    (m for m in self.measurements if m in available_measurements),
+                    available_measurements[0],
+                )
+                self.plot_measurements = [preferred]
             self.preview_plot = await asyncio.to_thread(
                 _build_plot,
                 ds,
@@ -960,6 +966,10 @@ def _build_dashboard(state: QueryState) -> pn.template.FastListTemplate:
     def _update_progress(event: param.parameterized.Event) -> None:
         progress_bar.active = event.new
         progress_bar.visible = event.new
+        if event.new:
+            main_tabs.styles = {"opacity": "0.4", "pointer-events": "none"}
+        else:
+            main_tabs.styles = {"opacity": "1", "pointer-events": "auto"}
 
     state.param.watch(_update_progress, "is_loading")
 
