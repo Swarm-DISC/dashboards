@@ -18,5 +18,5 @@ dev = [
 ]
 
 [tool.uv.sources]
-viresclient = { path = "../../VirES-Python-Client", editable = true }
-# viresclient = { git = "https://github.com/ESA-VirES/VirES-Python-Client.git", rev = "staging" }
+# viresclient = { path = "../../VirES-Python-Client", editable = true }
+viresclient = { git = "https://github.com/ESA-VirES/VirES-Python-Client.git", rev = "staging" }

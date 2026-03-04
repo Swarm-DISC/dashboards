@@ -9,9 +9,6 @@ ENV UV_PROJECT_ENVIRONMENT=/usr/local
 # Install dependencies and activate environment
 COPY pyproject.toml .
 COPY uv.lock .
-# Switch from local path to GitHub staging for Docker build
-RUN sed -i 's|^viresclient = { path.*|# viresclient = { path = "../../VirES-Python-Client", editable = true }|' pyproject.toml && \
-    sed -i 's|^# viresclient = { git.*|viresclient = { git = "https://github.com/ESA-VirES/VirES-Python-Client.git", rev = "staging" }|' pyproject.toml
 RUN uv sync --frozen
 ENV PATH="/app/.venv/bin:$PATH"
 
