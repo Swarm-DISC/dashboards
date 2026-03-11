@@ -433,8 +433,8 @@ def _calculate_auto_time_range(collection: str) -> tuple[dt.datetime, dt.datetim
     """Calculate automatic time range and the viresclient max chunk duration.
 
     Anchors to the END of available data and subtracts the span.
-    VOBS/GVO: 5 years. MAG HR: 5 min. MAG LR: 45 min.
-    AUX_OBSH: 1 year. AUX_OBSM: 1 day. AUX_OBSS: 45 min."""
+    VOBS/GVO: 1 year. MAG HR: 5 min. MAG LR: 45 min.
+    AUX_OBSH: 3 days. AUX_OBSM: 30 min. AUX_OBSS: 5 min."""
     collection_type = COLLECTIONS_TO_TYPES.get(collection, "MAG")
     is_vobs = collection_type in _ALL_VOBS_COLLECTION_TYPES
 
@@ -443,24 +443,27 @@ def _calculate_auto_time_range(collection: str) -> tuple[dt.datetime, dt.datetim
     is_obsh = collection_type == _AUX_OBSH_COLLECTION_TYPE
     is_obsm = collection_type == _AUX_OBSM_COLLECTION_TYPE
     is_obss = collection_type == _AUX_OBSS_COLLECTION_TYPE
+    is_obs = is_obsh or is_obsm or is_obss
+    start_obs = dt.datetime(2015, 1, 1)
     time_extent = _get_collection_time_extent(collection)
     if not time_extent:
         end = dt.datetime(2024, 3, 1)
         if is_vobs:
-            span = dt.timedelta(days=5 * 365)
+            span = dt.timedelta(days=365)
         elif is_mag_hr:
             span = dt.timedelta(minutes=5)
         elif is_mag:
             span = dt.timedelta(minutes=45)
         elif is_obsh:
-            span = dt.timedelta(days=28)
+            span = dt.timedelta(days=3)
         elif is_obsm:
-            span = dt.timedelta(days=1)
+            span = dt.timedelta(minutes=30)
         elif is_obss:
-            span = dt.timedelta(minutes=45)
+            span = dt.timedelta(minutes=5)
         else:
             span = dt.timedelta(minutes=1)
-        return end - span, end, _MAX_CHUNK_DURATION
+        start = start_obs if is_obs else end - span
+        return start, start + span, _MAX_CHUNK_DURATION
 
     _, end_str = time_extent
     try:
@@ -482,13 +485,15 @@ def _calculate_auto_time_range(collection: str) -> tuple[dt.datetime, dt.datetim
     elif is_mag:
         span = dt.timedelta(minutes=45)
     elif is_obsh:
-        span = dt.timedelta(days=365)
+        span = dt.timedelta(days=3)
     elif is_obsm:
-        span = dt.timedelta(days=1)
+        span = dt.timedelta(minutes=30)
     elif is_obss:
-        span = dt.timedelta(minutes=45)
+        span = dt.timedelta(minutes=5)
     else:
         span = sampling_step * 10
+    if is_obs:
+        return start_obs, start_obs + span, max_duration
     return end - span, end, max_duration
 
 
@@ -607,7 +612,7 @@ class QueryState(param.Parameterized):
 
     # --- Ground collection selection ---
     ground_collection_label = param.Selector(
-        default="AUX_OBSH (hourly)",
+        default="AUX_OBSM (minute)",
         objects=list(AUX_OBS_COLLECTIONS.keys()),
         label="Collection",
     )
@@ -726,9 +731,9 @@ class QueryState(param.Parameterized):
                 _build_preview_dataset,
                 self.collection,
                 list(self.measurements),
-                [] if (self.is_vobs or self.is_ground) else list(self.auxiliaries),
+                list(self.auxiliaries),
                 self.time_range,
-                "" if (self.is_vobs or self.is_ground) else self.magnetic_model,
+                self.magnetic_model,
                 self.is_vobs or self.is_ground,
             )
         except Exception as exc:
@@ -955,6 +960,36 @@ def _setup_watchers(
     state.param.watch(lambda e: setattr(html_pane, "object", e.new), "preview_dataset_html")
 
 
+def _build_nav_banner() -> pn.pane.HTML:
+    link_style = (
+        "color: #93c5fd; font-size: 11px; text-decoration: underline;"
+        " text-underline-offset: 2px; white-space: nowrap;"
+    )
+    return pn.pane.HTML(
+        f"""
+        <div style="
+            background: #0f2a4a;
+            border-radius: 6px;
+            padding: 6px 14px;
+            margin: 4px 0;
+            color: #e0e7ef;
+            font-family: sans-serif;
+        ">
+            <div style="font-size: 11px; line-height: 1.5; margin-bottom: 4px;">
+                This dashboard is in active development and is provided here for testing purposes<br>
+                Contact: <a href="mailto:ashley.smith@ed.ac.uk" style="{link_style}">ashley.smith@ed.ac.uk</a>
+            </div>
+            <div style="display: flex; gap: 18px; flex-wrap: wrap;">
+                <a href=".." style="{link_style}">..to the other dashboards</a>
+                <a href="https://viresclient.readthedocs.io/" target="_blank" style="{link_style}">viresclient Docs</a>
+                <a href="https://github.com/Swarm-DISC/dashboards/" target="_blank" style="{link_style}">Dashboards repo</a>
+            </div>
+        </div>
+        """,
+        sizing_mode="stretch_width",
+    )
+
+
 def _build_header_banner() -> pn.pane.HTML:
     return pn.pane.HTML(
         """
@@ -1073,12 +1108,16 @@ def _build_dashboard(state: QueryState) -> pn.template.FastListTemplate:
 
     return pn.template.FastListTemplate(
         title="VirES Query Builder",
+        header=[_build_nav_banner()],
         sidebar=[collection_section, time_section, parameters_section],
         main=[_build_header_banner(), main_card],
         sidebar_width=380,
         header_background="#1d4ed8",
         accent="#2563eb",
         theme_toggle=False,
+        raw_css=[
+            "#header { height: 80px !important; min-height: 80px !important; }",
+        ],
     )
 
 
