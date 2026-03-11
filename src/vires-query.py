@@ -643,6 +643,10 @@ class QueryState(param.Parameterized):
 
     @param.depends("collection_type", watch=True, on_init=True)
     def _update_collections_and_measurements(self) -> None:
+        # Reset model/auxiliaries before collection changes to avoid stale
+        # values leaking into requests triggered downstream.
+        self.magnetic_model = ""
+        self.auxiliaries = []
         # Update objects before values so ListSelector validation doesn't drop them.
         self.param["measurements"].objects = MEASUREMENTS_BY_COLLECTION[self.collection_type]
         self.measurements = list(self._default_measurements_by_type.get(self.collection_type, []))
@@ -804,7 +808,7 @@ class QueryState(param.Parameterized):
         new_type = COLLECTIONS_TO_TYPES.get(new_collection, self.collection_type)
         if new_type != self.collection_type:
             # Changing collection_type triggers _update_collections_and_measurements
-            # which sets measurements, collection objects, and collection value.
+            # which resets measurements, model, auxiliaries, collection objects, and collection value.
             self.collection_type = new_type
         else:
             # Same type (e.g. label changed within the same mission group):
@@ -906,17 +910,6 @@ def _build_parameters(state: QueryState) -> pn.Column:
         name="Auxiliaries",
         sizing_mode="stretch_width",
     )
-    is_not_mag = state.is_vobs or state.is_ground
-    models_param.disabled = is_not_mag
-    auxiliaries_param.disabled = is_not_mag
-
-    def _update_mag_params_enabled(event: param.parameterized.Event) -> None:
-        disabled = event.new in _ALL_VOBS_COLLECTION_TYPES or event.new == _GROUND_COLLECTION_TYPE
-        models_param.disabled = disabled
-        auxiliaries_param.disabled = disabled
-
-    state.param.watch(_update_mag_params_enabled, "collection_type")
-
     selection_tabs = pn.layout.Tabs(
         measurements_param,
         models_param,
