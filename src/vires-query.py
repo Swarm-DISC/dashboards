@@ -479,7 +479,7 @@ def _calculate_auto_time_range(collection: str) -> tuple[dt.datetime, dt.datetim
 
     max_duration = min(_NRECORDS_LIMIT * sampling_step, _MAX_CHUNK_DURATION)
     if is_vobs:
-        span = dt.timedelta(days=5 * 365)
+        span = dt.timedelta(days=365)
     elif is_mag_hr:
         span = dt.timedelta(minutes=5)
     elif is_mag:
